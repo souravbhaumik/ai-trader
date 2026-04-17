@@ -1,0 +1,44 @@
+# ─── Core API ─────────────────────────────────────────────────────────────────
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.12
+
+# ─── Database ─────────────────────────────────────────────────────────────────
+sqlmodel==0.0.21
+alembic==1.13.2
+asyncpg==0.29.0
+psycopg2-binary==2.9.9       # Alembic migrations use sync driver
+
+# ─── Auth & Security ──────────────────────────────────────────────────────────
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+bcrypt==4.0.1
+pyotp==2.9.0
+cryptography==42.0.8         # Fernet for TOTP secret encryption
+
+# ─── Redis ────────────────────────────────────────────────────────────────────
+redis[hiredis]==5.0.8
+
+# ─── HTTP client ──────────────────────────────────────────────────────────────
+httpx==0.27.2
+
+# ─── Settings & Config ────────────────────────────────────────────────────────
+pydantic-settings==2.3.4
+pydantic[email]==2.8.2
+
+# ─── Logging ──────────────────────────────────────────────────────────────────
+structlog==24.4.0
+
+# ─── Task queue (Phase 2) ─────────────────────────────────────────────────────
+celery[redis]==5.4.0
+kombu==5.3.7
+
+# ─── Market data (Phase 2) ────────────────────────────────────────────────────
+yfinance==0.2.54
+pandas==2.2.3
+numpy==1.26.4
+
+# ─── Broker SDKs (Phase 2) ────────────────────────────────────────────────────
+smartapi-python==1.4.0          # Angel One SmartAPI
+websocket-client==1.8.0         # Required by smartapi-python
+pyOpenSSL==24.2.1               # Required by smartapi-python
