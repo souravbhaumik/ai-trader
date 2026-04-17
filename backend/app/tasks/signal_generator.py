@@ -23,6 +23,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import structlog
 
+from sqlalchemy import text
+
+from app.core.database import get_sync_session
 from app.tasks.celery_app import celery_app
 
 logger = structlog.get_logger(__name__)
@@ -202,37 +205,22 @@ def _score_symbol(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  DB helpers
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _get_db_conn():
-    import psycopg2
-    from app.core.config import settings
-    return psycopg2.connect(
-        host=settings.db_host,
-        port=settings.db_port,
-        dbname=settings.db_name,
-        user=settings.db_user,
-        password=settings.db_password,
-    )
-
-
-# ══════════════════════════════════════════════════════════════════════════════
 #  Celery task
 # ══════════════════════════════════════════════════════════════════════════════
 
 @celery_app.task(bind=True, name="app.tasks.signal_generator.generate_signals")
 def generate_signals(self):
     """Compute RSI/MACD/Bollinger signals for all active symbols and persist them."""
-    conn = _get_db_conn()
-    cur  = conn.cursor()
-
-    try:
+    with get_sync_session() as session:
         # ── 1. Load active symbols ─────────────────────────────────────────────
-        cur.execute(
-            "SELECT symbol FROM stock_universe WHERE is_active = TRUE ORDER BY market_cap DESC NULLS LAST"
-        )
-        symbols: List[str] = [row[0] for row in cur.fetchall()]
+        symbols: List[str] = [
+            row[0] for row in session.execute(
+                text(
+                    "SELECT symbol FROM stock_universe"
+                    " WHERE is_active = TRUE ORDER BY market_cap DESC NULLS LAST"
+                )
+            ).fetchall()
+        ]
         total    = len(symbols)
         inserted = 0
         skipped  = 0
@@ -245,17 +233,16 @@ def generate_signals(self):
 
             for sym in batch:
                 # ── Fetch last _LOOKBACK days of OHLCV ────────────────────────
-                cur.execute(
-                    """
-                    SELECT close
-                    FROM   ohlcv_daily
-                    WHERE  symbol = %s
-                    ORDER  BY ts DESC
-                    LIMIT  %s
-                    """,
-                    (sym, _LOOKBACK),
-                )
-                rows = cur.fetchall()
+                rows = session.execute(
+                    text("""
+                        SELECT close
+                        FROM   ohlcv_daily
+                        WHERE  symbol = :symbol
+                        ORDER  BY ts DESC
+                        LIMIT  :limit
+                    """),
+                    {"symbol": sym, "limit": _LOOKBACK},
+                ).fetchall()
                 if len(rows) < _MIN_BARS:
                     skipped += 1
                     continue
@@ -271,36 +258,36 @@ def generate_signals(self):
                 sig_id = uuid.uuid4()
 
                 # ── Deactivate previous active signals for this symbol ─────────
-                cur.execute(
-                    "UPDATE signals SET is_active = FALSE WHERE symbol = %s AND is_active = TRUE",
-                    (sym,),
+                session.execute(
+                    text("UPDATE signals SET is_active = FALSE WHERE symbol = :symbol AND is_active = TRUE"),
+                    {"symbol": sym},
                 )
 
                 # ── Insert new signal ─────────────────────────────────────────
-                cur.execute(
-                    """
-                    INSERT INTO signals
-                        (id, symbol, ts, signal_type, confidence,
-                         entry_price, target_price, stop_loss,
-                         model_version, features, is_active, created_at)
-                    VALUES
-                        (%s, %s, %s, %s, %s,
-                         %s, %s, %s,
-                         %s, %s, TRUE, %s)
-                    """,
-                    (
-                        str(sig_id),
-                        sym,
-                        now_ts,
-                        signal["signal_type"],
-                        signal["confidence"],
-                        signal["entry_price"],
-                        signal["target_price"],
-                        signal["stop_loss"],
-                        _MODEL_VERSION,
-                        json.dumps(signal["features"]),
-                        now_ts,
-                    ),
+                session.execute(
+                    text("""
+                        INSERT INTO signals
+                            (id, symbol, ts, signal_type, confidence,
+                             entry_price, target_price, stop_loss,
+                             model_version, features, is_active, created_at)
+                        VALUES
+                            (:id, :symbol, :ts, :signal_type, :confidence,
+                             :entry_price, :target_price, :stop_loss,
+                             :model_version, :features, TRUE, :created_at)
+                    """),
+                    {
+                        "id":            str(sig_id),
+                        "symbol":        sym,
+                        "ts":            now_ts,
+                        "signal_type":   signal["signal_type"],
+                        "confidence":    signal["confidence"],
+                        "entry_price":   signal["entry_price"],
+                        "target_price":  signal["target_price"],
+                        "stop_loss":     signal["stop_loss"],
+                        "model_version": _MODEL_VERSION,
+                        "features":      json.dumps(signal["features"]),
+                        "created_at":    now_ts,
+                    },
                 )
                 inserted += 1
 
@@ -318,15 +305,7 @@ def generate_signals(self):
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("signal_generator.discord_failed", error=str(exc))
 
-            conn.commit()
+            session.commit()
 
         logger.info("signal_generator.done", inserted=inserted, skipped=skipped)
         return {"status": "ok", "inserted": inserted, "skipped": skipped}
-
-    except Exception as exc:
-        conn.rollback()
-        logger.error("signal_generator.error", error=str(exc))
-        raise
-    finally:
-        cur.close()
-        conn.close()

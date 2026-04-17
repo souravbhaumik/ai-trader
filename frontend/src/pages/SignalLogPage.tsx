@@ -1,4 +1,5 @@
-﻿import { useEffect, useState, useCallback } from 'react'
+﻿import { useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { Activity, ChevronUp, ChevronDown, ChevronsUpDown, ChevronLeft, ChevronRight } from 'lucide-react'
 import { apiClient } from '../api/client'
 
@@ -13,8 +14,6 @@ type SortDir = 'asc' | 'desc'
 type FilterType = 'ALL' | 'BUY' | 'SELL' | 'HOLD'
 
 export default function SignalLogPage() {
-  const [result, setResult]   = useState<SignalResult | null>(null)
-  const [loading, setLoading] = useState(true)
   const [filter, setFilter]   = useState<FilterType>('ALL')
   const [active, setActive]   = useState(false)
   const [page, setPage]       = useState(1)
@@ -22,19 +21,16 @@ export default function SignalLogPage() {
 
   const PER_PAGE = 50
 
-  const fetch = useCallback(() => {
-    setLoading(true)
-    const params = new URLSearchParams({ page: String(page), per_page: String(PER_PAGE) })
-    if (filter !== 'ALL') params.set('type', filter)
-    if (active)           params.set('active', 'true')
-    apiClient.get<SignalResult>(`/signals?${params}`)
-      .then(r => setResult(r.data))
-      .catch(() => setResult(null))
-      .finally(() => setLoading(false))
-  }, [filter, active, page])
-
-  useEffect(() => { setPage(1) }, [filter, active])
-  useEffect(() => { fetch() }, [fetch])
+  const { data: result, isFetching: loading } = useQuery({
+    queryKey: ['signals', filter, active, page, sortDir],
+    queryFn: () => {
+      const params = new URLSearchParams({ page: String(page), per_page: String(PER_PAGE) })
+      if (filter !== 'ALL') params.set('type', filter)
+      if (active)           params.set('active', 'true')
+      return apiClient.get<SignalResult>(`/signals?${params}`).then(r => r.data)
+    },
+    placeholderData: (prev) => prev,
+  })
 
   const totalPages = result ? Math.ceil(result.total / PER_PAGE) : 1
   const isEmpty    = !loading && (result?.signals.length ?? 0) === 0

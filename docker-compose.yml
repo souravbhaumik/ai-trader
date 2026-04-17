@@ -37,6 +37,23 @@ services:
       timeout: 3s
       retries: 5
 
+  # ── Alembic migrations (init container — runs once, then exits) ───────────
+  db-migrate:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: "no"
+    env_file: .env
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+    command: sh -c "PYTHONPATH=/app alembic upgrade head"
+
   # ── FastAPI Backend ────────────────────────────────────────────────────────
   backend:
     build:
@@ -56,10 +73,12 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
     volumes:
       - ./backend:/app       # hot-reload in dev (removed in prod)
     command: >
-      sh -c "PYTHONPATH=/app alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+      sh -c "PYTHONPATH=/app uvicorn app.main:app --host 0.0.0.0 --port 8000"
 
   # ── Celery Worker (async task execution) ──────────────────────────────────
   celery-worker:
@@ -78,6 +97,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
     volumes:
       - ./backend:/app
     command: >

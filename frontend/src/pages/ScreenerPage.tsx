@@ -1,4 +1,5 @@
-﻿import { useEffect, useState, useCallback } from 'react'
+﻿import { useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { BarChart2, Search, ChevronUp, ChevronDown, ChevronsUpDown, ChevronLeft, ChevronRight } from 'lucide-react'
 import { apiClient } from '../api/client'
 
@@ -18,11 +19,8 @@ function SortIcon({ field, sortKey, dir }: { field: SortKey; sortKey: SortKey; d
 }
 
 export default function ScreenerPage() {
-  const [result, setResult]     = useState<ScreenerResult | null>(null)
-  const [loading, setLoading]   = useState(true)
   const [q, setQ]               = useState('')
   const [sector, setSector]     = useState('ALL')
-  const [sectors, setSectors]   = useState<string[]>([])
   const [signal, setSignal]     = useState('ALL')
   const [page, setPage]         = useState(1)
   const [sortBy, setSortBy]     = useState<SortKey>('market_cap')
@@ -30,33 +28,32 @@ export default function ScreenerPage() {
 
   const PER_PAGE = 50
 
-  const fetch = useCallback(() => {
-    setLoading(true)
-    const params = new URLSearchParams({
-      page: String(page), per_page: String(PER_PAGE),
-      sort_by: sortBy, sort_dir: sortDir,
-    })
-    if (q.trim())         params.set('q', q.trim())
-    if (sector !== 'ALL') params.set('sector', sector)
-    if (signal !== 'ALL') params.set('signal', signal)
-    apiClient.get<ScreenerResult>(`/screener?${params}`)
-      .then(r => setResult(r.data))
-      .catch(() => setResult(null))
-      .finally(() => setLoading(false))
-  }, [q, sector, signal, page, sortBy, sortDir])
+  const { data: sectorsData } = useQuery({
+    queryKey: ['screener-sectors'],
+    queryFn: () => apiClient.get<{ sectors: string[] }>('/screener/sectors').then(r => r.data),
+    staleTime: 5 * 60_000,
+  })
+  const sectors = sectorsData?.sectors ?? []
 
-  useEffect(() => {
-    apiClient.get<{ sectors: string[] }>('/screener/sectors')
-      .then(r => setSectors(r.data.sectors ?? []))
-      .catch(() => {})
-  }, [])
-
-  useEffect(() => { setPage(1) }, [q, sector, signal, sortBy, sortDir])
-  useEffect(() => { fetch() }, [fetch])
+  const { data: result, isFetching: loading } = useQuery({
+    queryKey: ['screener', page, sortBy, sortDir, q, sector, signal],
+    queryFn: () => {
+      const params = new URLSearchParams({
+        page: String(page), per_page: String(PER_PAGE),
+        sort_by: sortBy, sort_dir: sortDir,
+      })
+      if (q.trim())         params.set('q', q.trim())
+      if (sector !== 'ALL') params.set('sector', sector)
+      if (signal !== 'ALL') params.set('signal', signal)
+      return apiClient.get<ScreenerResult>(`/screener?${params}`).then(r => r.data)
+    },
+    placeholderData: (prev) => prev,
+  })
 
   function toggleSort(col: SortKey) {
     if (col === sortBy) setSortDir(d => d === 'asc' ? 'desc' : 'asc')
     else { setSortBy(col); setSortDir('desc') }
+    setPage(1)
   }
 
   const totalPages = result ? Math.ceil(result.total / PER_PAGE) : 1

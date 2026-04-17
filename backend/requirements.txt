@@ -38,6 +38,9 @@ yfinance==0.2.54
 pandas==2.2.3
 numpy==1.26.4
 
+# ─── Resilience ──────────────────────────────────────────────────────────────
+tenacity==8.3.0
+
 # ─── Broker SDKs (Phase 2) ────────────────────────────────────────────────────
 smartapi-python==1.4.0          # Angel One SmartAPI
 websocket-client==1.8.0         # Required by smartapi-python

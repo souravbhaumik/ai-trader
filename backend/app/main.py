@@ -1,6 +1,7 @@
 """FastAPI application factory."""
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 
 import structlog
@@ -20,7 +21,18 @@ logger = structlog.get_logger(__name__)
 async def lifespan(app: FastAPI):
     logger.info("startup", environment=settings.environment)
     await init_redis()
+
+    # Start the single shared price broadcaster for WebSocket fan-out
+    from app.api.v1.ws import price_broadcaster
+    broadcaster_task = asyncio.create_task(price_broadcaster())
+
     yield
+
+    broadcaster_task.cancel()
+    try:
+        await broadcaster_task
+    except asyncio.CancelledError:
+        pass
     await close_redis()
     logger.info("shutdown")
 

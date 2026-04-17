@@ -151,7 +151,7 @@ class _TotpVerifyRequest(BaseModel):
 
 
 async def _current_user(request: Request, session: AsyncSession) -> User:
-    """Extract Bearer JWT and return the corresponding active User."""
+    """Extract Bearer JWT, verify blocklist, and return the active User."""
     auth_hdr = request.headers.get("Authorization", "")
     if not auth_hdr.startswith("Bearer "):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing bearer token.")
@@ -160,6 +160,13 @@ async def _current_user(request: Request, session: AsyncSession) -> User:
         payload = decode_access_token(token)
     except JWTError:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired token.")
+
+    # ── Blocklist check ───────────────────────────────────────────────────────
+    from app.core.redis_client import get_redis as _get_redis
+    jti = payload.get("jti")
+    if jti and await _get_redis().exists(f"blocklist:{jti}"):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token has been revoked.")
+
     user_id = uuid.UUID(payload["sub"])
     result  = await session.execute(select(User).where(User.id == user_id))
     user    = result.scalar_one_or_none()

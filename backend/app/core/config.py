@@ -24,10 +24,19 @@ class Settings(BaseSettings):
 
     @property
     def database_url(self) -> str:
-        """Async URL for SQLAlchemy (asyncpg driver)."""
+        """Async URL for SQLAlchemy (asyncpg driver) — used by FastAPI."""
         from urllib.parse import quote_plus
         return (
             f"postgresql+asyncpg://{quote_plus(self.db_user)}:{quote_plus(self.db_password)}"
+            f"@{self.db_host}:{self.db_port}/{self.db_name}"
+        )
+
+    @property
+    def sync_database_url(self) -> str:
+        """Sync URL for SQLAlchemy (psycopg2 driver) — used by Celery workers."""
+        from urllib.parse import quote_plus
+        return (
+            f"postgresql+psycopg2://{quote_plus(self.db_user)}:{quote_plus(self.db_password)}"
             f"@{self.db_host}:{self.db_port}/{self.db_name}"
         )
 

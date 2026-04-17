@@ -2,18 +2,24 @@
 
 URL: ``ws://<host>/api/v1/ws/prices?token=<jwt>&symbols=RELIANCE.NS,TCS.NS``
 
-* Authentication is performed via the ``token`` query parameter (Bearer
-  tokens cannot be sent as headers from a browser WebSocket).
-* The server pushes a JSON price update every ``PUSH_INTERVAL_SECS`` seconds
-  for each requested symbol, sourced from yfinance (15-minute delayed data).
-* On client disconnect the loop exits cleanly.
+Architecture
+------------
+* A **single** background asyncio task (``price_broadcaster``) runs for the
+  lifetime of the FastAPI process. Every ``PUSH_INTERVAL_SECS`` seconds it
+  collects all unique symbols across every active connection, fetches prices
+  from yfinance **once**, and fans the results into each connection's queue.
+* Each WebSocket handler registers with the ``ConnectionManager``, reads from
+  its private ``asyncio.Queue``, and calls ``disconnect`` on exit.
+
+This ensures we never hit Yahoo Finance more than once per interval regardless
+of how many concurrent clients are connected.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import time
-from typing import List
+from typing import Dict, Set, Tuple
 
 import structlog
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
@@ -26,13 +32,62 @@ logger = structlog.get_logger(__name__)
 router = APIRouter(tags=["websocket"])
 
 _PUSH_INTERVAL_SECS = 15
-_MAX_SYMBOLS        = 20   # guard against abuse
+_MAX_SYMBOLS        = 20
 
 
-# ── Price fetcher (runs in thread pool so it doesn't block the event loop) ───
+# ══════════════════════════════════════════════════════════════════════════════
+#  Connection Manager
+# ══════════════════════════════════════════════════════════════════════════════
 
-def _fetch_prices_sync(symbols: List[str]) -> List[dict]:
-    """Fetch latest quote for each symbol via yfinance and return a list of dicts."""
+class ConnectionManager:
+    """Fan-out hub: one queue per active WebSocket client."""
+
+    def __init__(self) -> None:
+        # ws_id → (requested_symbols, output_queue)
+        self._connections: Dict[int, Tuple[Set[str], asyncio.Queue]] = {}
+        self._lock = asyncio.Lock()
+
+    async def connect(self, ws_id: int, symbols: Set[str]) -> asyncio.Queue:
+        q: asyncio.Queue = asyncio.Queue(maxsize=8)
+        async with self._lock:
+            self._connections[ws_id] = (symbols, q)
+        return q
+
+    async def disconnect(self, ws_id: int) -> None:
+        async with self._lock:
+            self._connections.pop(ws_id, None)
+
+    def all_symbols(self) -> Set[str]:
+        """Union of every symbol currently being watched."""
+        result: Set[str] = set()
+        for syms, _ in self._connections.values():
+            result |= syms
+        return result
+
+    async def broadcast(self, prices: list) -> None:
+        """Route relevant prices into each connection's queue."""
+        prices_by_sym = {p["symbol"]: p for p in prices}
+        async with self._lock:
+            snapshot = list(self._connections.values())
+        for syms, queue in snapshot:
+            relevant = [prices_by_sym[s] for s in syms if s in prices_by_sym]
+            if relevant:
+                try:
+                    queue.put_nowait({"type": "prices", "data": relevant})
+                except asyncio.QueueFull:
+                    pass  # slow client — silently drop stale frame
+
+
+# Module-level singleton — shared across all WebSocket connections.
+manager = ConnectionManager()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Single shared price fetcher (runs in a thread pool)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _fetch_prices_sync(symbols: list) -> list:
+    """Fetch the latest price for each symbol via yfinance (sync, thread-safe)."""
     try:
         import yfinance as yf  # type: ignore
     except ImportError:
@@ -41,16 +96,14 @@ def _fetch_prices_sync(symbols: List[str]) -> List[dict]:
     result = []
     for sym in symbols:
         try:
-            ticker = yf.Ticker(sym)
-            info   = ticker.fast_info
-            price  = getattr(info, "last_price", None) or getattr(info, "regularMarketPrice", None)
-            prev_close = getattr(info, "previous_close", None) or getattr(info, "regularMarketPreviousClose", None)
+            fi      = yf.Ticker(sym).fast_info
+            price   = getattr(fi, "last_price", None)
+            prev_cl = getattr(fi, "previous_close", None)
             if price is None:
                 continue
             change_pct = (
-                round((price - prev_close) / prev_close * 100, 2)
-                if prev_close and prev_close != 0
-                else 0.0
+                round((price - prev_cl) / prev_cl * 100, 2)
+                if prev_cl and prev_cl != 0 else 0.0
             )
             result.append({
                 "symbol":     sym,
@@ -59,23 +112,45 @@ def _fetch_prices_sync(symbols: List[str]) -> List[dict]:
                 "ts":         int(time.time()),
             })
         except Exception as exc:  # noqa: BLE001
-            logger.warning("ws.price_fetch_error", symbol=sym, error=str(exc))
+            logger.debug("ws.fetch_skip", symbol=sym, error=str(exc))
     return result
 
 
-# ── WebSocket handler ─────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+#  Background broadcaster (started once in FastAPI lifespan)
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def price_broadcaster() -> None:
+    """Infinite loop: fetch prices for all subscribed symbols, fan out to queues.
+
+    Called once from ``app.main.lifespan``; runs for the process lifetime.
+    Sleeps first so the first fetch happens after clients have connected.
+    """
+    loop = asyncio.get_event_loop()
+    while True:
+        await asyncio.sleep(_PUSH_INTERVAL_SECS)
+        try:
+            symbols = list(manager.all_symbols())
+            if not symbols:
+                continue
+            prices = await loop.run_in_executor(None, _fetch_prices_sync, symbols)
+            if prices:
+                await manager.broadcast(prices)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("price_broadcaster.error", error=str(exc))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  WebSocket endpoint
+# ══════════════════════════════════════════════════════════════════════════════
 
 @router.websocket("/ws/prices")
 async def ws_prices(
     websocket: WebSocket,
     token: str = Query(..., description="JWT access token"),
-    symbols: str = Query("", description="Comma-separated list of ticker symbols"),
+    symbols: str = Query("", description="Comma-separated ticker symbols"),
 ):
-    """Stream live price updates for requested symbols.
-
-    The client must supply a valid JWT via the ``token`` query parameter.
-    Connection is closed with code 4001 on auth failure.
-    """
+    """Stream live price updates via a fan-out queue (not per-client polling)."""
     # ── Auth ─────────────────────────────────────────────────────────────────
     try:
         payload = decode_access_token(token)
@@ -83,48 +158,54 @@ async def ws_prices(
         await websocket.close(code=4001, reason="Invalid or expired token.")
         return
 
+    # ── Blocklist check ───────────────────────────────────────────────────────
+    jti = payload.get("jti")
+    if jti:
+        try:
+            from app.core.redis_client import get_redis
+            if await get_redis().exists(f"blocklist:{jti}"):
+                await websocket.close(code=4001, reason="Token has been revoked.")
+                return
+        except Exception:
+            pass  # Redis unavailable — allow connection, not a hard dependency
+
     user_id = payload.get("sub", "unknown")
 
-    # ── Parse & sanitise requested symbols ───────────────────────────────────
-    requested = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    # ── Parse symbols ─────────────────────────────────────────────────────────
+    requested: Set[str] = {
+        s.strip().upper()
+        for s in symbols.split(",")
+        if s.strip()
+    }
     if not requested:
         await websocket.close(code=4002, reason="No symbols requested.")
         return
     if len(requested) > _MAX_SYMBOLS:
-        requested = requested[:_MAX_SYMBOLS]
+        requested = set(list(requested)[:_MAX_SYMBOLS])
 
     await websocket.accept()
-    logger.info("ws.prices.connected", user_id=user_id, symbols=requested)
+    ws_id = id(websocket)
+    queue = await manager.connect(ws_id, requested)
+    logger.info("ws.prices.connected", user_id=user_id, symbols=list(requested))
 
-    # ── Send initial connection ack ───────────────────────────────────────────
     await websocket.send_text(json.dumps({
-        "type":    "connected",
-        "symbols": requested,
+        "type":          "connected",
+        "symbols":       list(requested),
         "interval_secs": _PUSH_INTERVAL_SECS,
     }))
 
-    loop = asyncio.get_event_loop()
-
     try:
         while True:
-            # Fetch prices in a thread to keep the async loop free
-            prices = await loop.run_in_executor(None, _fetch_prices_sync, requested)
-
-            if prices:
-                await websocket.send_text(json.dumps({
-                    "type":   "prices",
-                    "data":   prices,
-                }))
-
-            # Wait for the next push interval, checking for client disconnect
+            # Block until the broadcaster puts something in this client's queue.
+            # We use a timeout so a dead broadcaster doesn't strand the client.
             try:
-                await asyncio.wait_for(
-                    websocket.receive_text(),   # raises WebSocketDisconnect on close
-                    timeout=_PUSH_INTERVAL_SECS,
-                )
-                # If client sends anything (e.g. ping), we just ignore it
+                msg = await asyncio.wait_for(queue.get(), timeout=60)
             except asyncio.TimeoutError:
-                pass   # normal — just means no client message; continue streaming
+                # Send a keepalive ping to detect stale connections
+                await websocket.send_text(json.dumps({"type": "ping"}))
+                continue
+
+            await websocket.send_text(json.dumps(msg))
 
     except WebSocketDisconnect:
         logger.info("ws.prices.disconnected", user_id=user_id)
@@ -134,3 +215,6 @@ async def ws_prices(
             await websocket.close(code=1011)
         except Exception:
             pass
+    finally:
+        await manager.disconnect(ws_id)
+

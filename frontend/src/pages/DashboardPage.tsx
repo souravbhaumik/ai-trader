@@ -1,4 +1,4 @@
-﻿import { useEffect, useState } from 'react'
+﻿import { useQuery } from '@tanstack/react-query'
 import { Wallet, Activity, Target, Clock, TrendingUp, TrendingDown } from 'lucide-react'
 import { apiClient } from '../api/client'
 
@@ -41,26 +41,20 @@ function IndexPill({ q }: { q: IndexQuote }) {
 }
 
 export default function DashboardPage() {
-  const [indices, setIndices] = useState<IndexQuote[]>([])
-  const [signals, setSignals] = useState<Signal[]>([])
-  const [loading, setLoading] = useState(true)
+  const { data: indicesData, isLoading: indicesLoading } = useQuery({
+    queryKey: ['indices'],
+    queryFn: () => apiClient.get('/prices/indices').then(r => r.data),
+  })
+  const { data: signalsData, isLoading: signalsLoading } = useQuery({
+    queryKey: ['signals-recent'],
+    queryFn: () => apiClient.get('/signals?per_page=5&active=true').then(r => r.data),
+  })
 
-  useEffect(() => {
-    Promise.all([
-      apiClient.get('/prices/indices').then(r => {
-        const data = r.data
-        const raw: IndexQuote[] = (data.indices ?? []).map((q: IndexQuote & { name?: string }) => ({
-          ...q,
-          name: q.name ?? q.symbol,
-        }))
-        setIndices(raw)
-      }).catch(() => {}),
-      apiClient.get('/signals?per_page=5&active=true').then(r => {
-        setSignals(r.data.signals ?? [])
-      }).catch(() => {}),
-    ]).finally(() => setLoading(false))
-  }, [])
-
+  const indices: IndexQuote[] = (indicesData?.indices ?? []).map((q: IndexQuote & { name?: string }) => ({
+    ...q, name: q.name ?? q.symbol,
+  }))
+  const signals: Signal[] = signalsData?.signals ?? []
+  const loading = indicesLoading || signalsLoading
   const activeCount = signals.filter(s => s.signal_type !== 'HOLD').length
 
   return (

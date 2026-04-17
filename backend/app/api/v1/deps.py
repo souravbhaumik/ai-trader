@@ -10,16 +10,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.core.database import get_session
+from app.core.redis_client import get_redis
 from app.core.security import decode_access_token
 from app.models.user import User
 from app.models.user_settings import UserSettings
+
+_BLOCKLIST_PREFIX = "blocklist:"
 
 
 async def get_current_user(
     request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> User:
-    """Extract Bearer token and return the authenticated User."""
+    """Extract Bearer token and return the authenticated User.
+
+    Checks the Redis JTI blocklist on every request so that logged-out or
+    admin-revoked tokens are rejected immediately (within the 15-min TTL).
+    """
     auth_hdr = request.headers.get("Authorization", "")
     if not auth_hdr.startswith("Bearer "):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing bearer token.")
@@ -28,6 +35,13 @@ async def get_current_user(
         payload = decode_access_token(token)
     except JWTError:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired token.")
+
+    # ── Blocklist check: reject tokens whose JTI was revoked on logout ────────
+    jti = payload.get("jti")
+    if jti:
+        redis = get_redis()
+        if await redis.exists(f"{_BLOCKLIST_PREFIX}{jti}"):
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token has been revoked.")
 
     user_id = uuid.UUID(payload["sub"])
     result = await session.execute(select(User).where(User.id == user_id))
