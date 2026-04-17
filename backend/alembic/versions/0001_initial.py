@@ -16,6 +16,17 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # ── Create generic timestamp trigger function ─────────────────────────────
+    op.execute("""
+        CREATE OR REPLACE FUNCTION fn_set_tbl_last_dt()
+        RETURNS TRIGGER LANGUAGE plpgsql AS $$
+        BEGIN
+            NEW.tbl_last_dt = NOW();
+            RETURN NEW;
+        END;
+        $$;
+    """)
+
     # ── users ─────────────────────────────────────────────────────────────────
     op.execute("""
         CREATE TABLE IF NOT EXISTS users (
