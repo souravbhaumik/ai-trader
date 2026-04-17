@@ -232,4 +232,14 @@ def train_lgbm(
         session.commit()
 
     logger.info("lgbm_trainer.registered", model_id=model_id, version=version)
+
+    # ── Release C++ LightGBM memory (prevents RAM inflation on repeated runs) ─
+    import gc
+    try:
+        del clf
+        del train_data
+    except NameError:
+        pass
+    gc.collect()
+
     return {"model_id": model_id, "version": version, "metrics": metrics, "artifact": str(artifact)}

@@ -120,8 +120,22 @@ def ingest_bhavcopy(trade_date_str: str | None = None) -> dict:
     logger.info("bhavcopy.start", trade_date=str(trade_date))
 
     # ── Download with stale-date retry ───────────────────────────────────────
+    # A 404 means NSE didn't publish a file — almost always a market holiday.
+    # Distinguish that clean skip from a genuine network/stale-date failure.
+    import requests as _req
+
+    holiday_skip = False
     df = None
     for attempt in range(1, _MAX_RETRIES + 1):
+        url = _bhavcopy_url(trade_date)
+        try:
+            _probe = _req.head(url, timeout=10)
+            if _probe.status_code == 404:
+                holiday_skip = True
+                break          # no point retrying — NSE won't publish on a holiday
+        except Exception:
+            pass               # fall through to _download_df which logs the error
+
         df = _download_df(trade_date)
         if df is not None:
             break
@@ -133,6 +147,12 @@ def ingest_bhavcopy(trade_date_str: str | None = None) -> dict:
             write_task_status(_TASK_NAME, "running", retry_msg, started_at=started)
             logger.info("bhavcopy.waiting", attempt=attempt)
             time.sleep(_RETRY_WAIT_SECS)
+
+    if holiday_skip:
+        msg = f"No Bhavcopy for {trade_date} — likely a market holiday or weekend."
+        write_task_status(_TASK_NAME, "done", msg, started_at=started, finished_at=now_iso())
+        logger.info("bhavcopy.holiday_skip", trade_date=str(trade_date))
+        return {"status": "skipped", "date": str(trade_date), "message": msg}
 
     if df is None:
         msg = f"Bhavcopy for {trade_date} unavailable after {_MAX_RETRIES} attempts."
