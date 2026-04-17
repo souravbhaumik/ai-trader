@@ -31,6 +31,7 @@ structlog==24.4.0
 
 # ─── Task queue (Phase 2) ─────────────────────────────────────────────────────
 celery[redis]==5.4.0
+flower==2.0.1
 kombu==5.3.7
 
 # ─── Market data (Phase 2) ────────────────────────────────────────────────────
@@ -45,3 +46,17 @@ tenacity==8.3.0
 smartapi-python==1.4.0          # Angel One SmartAPI
 websocket-client==1.8.0         # Required by smartapi-python
 pyOpenSSL==24.2.1               # Required by smartapi-python
+
+# ─── News Sentiment Pipeline (Phase 4) ────────────────────────────────────────
+feedparser==6.0.11              # RSS feed parsing
+gnews==0.4.3                    # Google News headlines by keyword (0.3.x conflicts with dnspython>=2)
+spacy==3.7.5                    # NER — company name → NSE symbol
+# Run after build:  python -m spacy download en_core_web_sm
+transformers==4.41.2            # HuggingFace (FinBERT)
+torch==2.3.1                    # FinBERT inference (CPU in dev; GPU via CUDA tag in prod)
+rapidfuzz==3.9.3                # Fuzzy company-name → symbol matching
+
+# ─── AI/ML Pipeline (Phase 3) ─────────────────────────────────────────────────
+lightgbm==4.3.0                 # Gradient boosting classifier for signal prediction
+scikit-learn==1.5.0             # train_test_split, metrics
+mlflow==2.14.1                  # Experiment tracking (optional; set MLFLOW_TRACKING_URI to enable)

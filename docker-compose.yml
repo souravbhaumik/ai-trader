@@ -101,6 +101,7 @@ services:
         condition: service_completed_successfully
     volumes:
       - ./backend:/app
+      - hf_model_cache:/root/.cache/huggingface
     command: >
       sh -c "PYTHONPATH=/app celery -A app.tasks.celery_app worker
       --loglevel=info --concurrency=2 -Q celery"
@@ -122,10 +123,33 @@ services:
     volumes:
       - ./backend:/app
       - celery_beat_data:/tmp/celerybeat
+      - hf_model_cache:/root/.cache/huggingface
     command: >
       sh -c "PYTHONPATH=/app celery -A app.tasks.celery_app beat
       --loglevel=info --scheduler celery.beat:PersistentScheduler
       --schedule /tmp/celerybeat/celerybeat-schedule"
+
+  # ── Flower (Celery task monitor — http://localhost:5555) ─────────────────
+  flower:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    ports:
+      - "5555:5555"
+    depends_on:
+      - celery-worker
+    volumes:
+      - ./backend:/app
+    command: >
+      sh -c "PYTHONPATH=/app celery -A app.tasks.celery_app flower
+      --port=5555 --broker_api=redis://:${REDIS_PASSWORD}@redis:6379/1"
 
   # ── Vite Frontend (dev server) ─────────────────────────────────────────────
   frontend:
@@ -147,3 +171,4 @@ volumes:
   postgres_data:
   redis_data:
   celery_beat_data:
+  hf_model_cache:

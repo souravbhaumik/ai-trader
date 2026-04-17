@@ -2,10 +2,18 @@
 
 Endpoints
 ---------
-POST  /admin/pipeline/backfill           Enqueue a full historical backfill
-GET   /admin/pipeline/backfill/progress  Poll progress stored in Redis
-POST  /admin/pipeline/eod-ingest         Manually trigger an EOD data pull
-POST  /admin/pipeline/generate-signals   Manually trigger signal generation
+POST  /admin/pipeline/backfill              Enqueue historical OHLCV backfill (yfinance)
+GET   /admin/pipeline/backfill/progress     Poll backfill progress from Redis
+POST  /admin/pipeline/bhavcopy              Trigger NSE Bhavcopy ingest (manual)
+POST  /admin/pipeline/broker-backfill       Trigger broker API historical backfill (stub)
+POST  /admin/pipeline/eod-ingest            Manually trigger EOD data pull
+POST  /admin/pipeline/generate-signals      Manually trigger signal generation
+POST  /admin/pipeline/train-model           Enqueue LightGBM training run
+GET   /admin/pipeline/models                List all trained model versions
+POST  /admin/pipeline/models/{id}/promote   Promote a model to active
+POST  /admin/pipeline/models/{id}/rollback  Deactivate a model
+POST  /admin/pipeline/populate-universe     Populate stock_universe from NSE master CSV
+GET   /admin/pipeline/status                Get last-run status for all pipeline tasks
 """
 from __future__ import annotations
 
@@ -188,3 +196,354 @@ async def trigger_signal_generation(
         task_id=result.id,
         message="Signal generation task enqueued.",
     )
+
+
+# ── Phase 3: ML model management ──────────────────────────────────────────────
+
+class ModelInfo(BaseModel):
+    id: str
+    model_type: str
+    version: str
+    is_active: bool
+    metrics: dict
+    artifact_path: str
+    trained_at: str
+    promoted_at: Optional[str] = None
+    notes: Optional[str] = None
+
+
+@router.post(
+    "/train-model",
+    response_model=TaskEnqueuedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def trigger_model_training(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    """Enqueue a LightGBM training run (admin only).
+
+    Training runs asynchronously. Poll ``GET /admin/pipeline/models`` to see
+    when the new version appears and then promote it.
+    """
+    await _require_admin(request, session)
+
+    try:
+        from app.tasks.ml_training import train_model
+        result = train_model.delay()
+    except Exception as exc:
+        logger.error("pipeline.train_model_enqueue_failed", error=str(exc))
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Could not reach Celery broker. Is the worker running?",
+        )
+
+    logger.info("pipeline.train_model_queued", task_id=result.id)
+    return TaskEnqueuedResponse(
+        task_id=result.id,
+        message="Model training enqueued. This may take several minutes.",
+    )
+
+
+@router.get("/models", response_model=list[ModelInfo])
+async def list_models(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    """List all trained model versions (admin only)."""
+    await _require_admin(request, session)
+
+    from sqlalchemy import text as _text
+    rows = (await session.execute(
+        _text("""
+            SELECT id, model_type, version, is_active, metrics,
+                   artifact_path, trained_at, promoted_at, notes
+            FROM   ml_models
+            ORDER  BY trained_at DESC
+            LIMIT  50
+        """)
+    )).fetchall()
+
+    return [
+        ModelInfo(
+            id=str(r[0]),
+            model_type=r[1],
+            version=r[2],
+            is_active=r[3],
+            metrics=r[4] or {},
+            artifact_path=r[5],
+            trained_at=r[6].isoformat() if hasattr(r[6], "isoformat") else str(r[6]),
+            promoted_at=r[7].isoformat() if r[7] and hasattr(r[7], "isoformat") else None,
+            notes=r[8],
+        )
+        for r in rows
+    ]
+
+
+@router.post("/models/{model_id}/promote", response_model=ModelInfo)
+async def promote_model(
+    model_id: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    """Promote a trained model to active (admin only).
+
+    Deactivates the currently active model of the same type and marks
+    this version as active. The signal generator reloads it within 5 min
+    (or immediately if the worker is restarted).
+    """
+    await _require_admin(request, session)
+
+    from sqlalchemy import text as _text
+
+    # Resolve admin user ID from token
+    auth_hdr = request.headers.get("Authorization", "")
+    token    = auth_hdr.removeprefix("Bearer ").strip()
+    from app.core.security import decode_access_token
+    payload  = decode_access_token(token)
+    admin_id = payload.get("sub")
+
+    row = (await session.execute(
+        _text("SELECT id, model_type, version FROM ml_models WHERE id = :mid"),
+        {"mid": model_id},
+    )).fetchone()
+
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Model {model_id} not found.")
+
+    m_type = row[1]
+
+    # Deactivate current active model of same type
+    await session.execute(
+        _text("UPDATE ml_models SET is_active = FALSE WHERE model_type = :t AND is_active = TRUE"),
+        {"t": m_type},
+    )
+
+    # Promote requested model
+    await session.execute(
+        _text("""
+            UPDATE ml_models
+            SET    is_active = TRUE, promoted_at = NOW(), promoted_by = :admin_id
+            WHERE  id = :mid
+        """),
+        {"mid": model_id, "admin_id": admin_id},
+    )
+    await session.commit()
+
+    # Force the in-process model loader to reload immediately
+    try:
+        from app.services.ml_loader import force_reload
+        force_reload()
+    except Exception:
+        pass  # loader may not be warmed in the API process — that's fine
+
+    logger.info("pipeline.model_promoted", model_id=model_id, model_type=m_type, promoted_by=admin_id)
+
+    result = (await session.execute(
+        _text("""
+            SELECT id, model_type, version, is_active, metrics,
+                   artifact_path, trained_at, promoted_at, notes
+            FROM   ml_models WHERE id = :mid
+        """),
+        {"mid": model_id},
+    )).fetchone()
+
+    return ModelInfo(
+        id=str(result[0]), model_type=result[1], version=result[2],
+        is_active=result[3], metrics=result[4] or {},
+        artifact_path=result[5],
+        trained_at=result[6].isoformat() if hasattr(result[6], "isoformat") else str(result[6]),
+        promoted_at=result[7].isoformat() if result[7] else None,
+        notes=result[8],
+    )
+
+
+@router.post("/models/{model_id}/rollback")
+async def rollback_model(
+    model_id: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    """Deactivate the specified model, reverting to technical-only signals (admin only)."""
+    await _require_admin(request, session)
+
+    from sqlalchemy import text as _text
+
+    result = await session.execute(
+        _text("UPDATE ml_models SET is_active = FALSE WHERE id = :mid RETURNING id, version"),
+        {"mid": model_id},
+    )
+    row = result.fetchone()
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Model {model_id} not found.")
+
+    await session.commit()
+
+    try:
+        from app.services.ml_loader import force_reload
+        force_reload()
+    except Exception:
+        pass
+
+    logger.info("pipeline.model_rolled_back", model_id=model_id, version=row[1])
+    return {"status": "rolled_back", "model_id": str(row[0]), "version": row[1]}
+
+
+# ── NSE Bhavcopy ingest ───────────────────────────────────────────────────────
+
+class BhavcopRequest(BaseModel):
+    trade_date: Optional[str] = None   # ISO date string; defaults to today in the task
+
+
+@router.post(
+    "/bhavcopy",
+    response_model=TaskEnqueuedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def trigger_bhavcopy(
+    body: BhavcopRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    """Manually trigger an NSE Bhavcopy ingest for a given date (admin only)."""
+    await _require_admin(request, session)
+
+    try:
+        from app.tasks.bhavcopy import ingest_bhavcopy
+        result = ingest_bhavcopy.delay(trade_date_str=body.trade_date)
+    except Exception as exc:
+        logger.error("pipeline.bhavcopy_enqueue_failed", error=str(exc))
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Could not reach Celery broker. Is the worker running?",
+        )
+
+    date_label = body.trade_date or "today"
+    logger.info("pipeline.bhavcopy_queued", task_id=result.id, date=date_label)
+    return TaskEnqueuedResponse(
+        task_id=result.id,
+        message=f"Bhavcopy ingest enqueued for {date_label}.",
+    )
+
+
+# ── Broker API historical backfill ────────────────────────────────────────────
+
+class BrokerBackfillRequest(BaseModel):
+    period: Literal["1y", "2y", "5y"] = "1y"
+
+
+@router.post(
+    "/broker-backfill",
+    response_model=TaskEnqueuedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def trigger_broker_backfill(
+    body: BrokerBackfillRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    """Enqueue a broker API historical OHLCV backfill (admin only).
+
+    Returns a clear error until BROKER_NAME is set in .env.
+    """
+    await _require_admin(request, session)
+
+    try:
+        from app.tasks.broker_backfill import run_broker_backfill
+        result = run_broker_backfill.delay(period=body.period)
+    except Exception as exc:
+        logger.error("pipeline.broker_backfill_enqueue_failed", error=str(exc))
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Could not reach Celery broker. Is the worker running?",
+        )
+
+    logger.info("pipeline.broker_backfill_queued", task_id=result.id, period=body.period)
+    return TaskEnqueuedResponse(
+        task_id=result.id,
+        message=(
+            f"Broker backfill ({body.period}) enqueued. "
+            "Will fail until BROKER_NAME is set in .env."
+        ),
+    )
+
+
+# ── Universe population ───────────────────────────────────────────────────────
+
+class PopulateUniverseRequest(BaseModel):
+    nifty500_only: bool = False
+
+
+@router.post(
+    "/populate-universe",
+    response_model=TaskEnqueuedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def trigger_populate_universe(
+    body: PopulateUniverseRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    """Populate (or refresh) stock_universe from NSE master CSV (admin only).
+
+    Safe to re-run: uses ON CONFLICT DO UPDATE.
+    nifty500_only=True inserts only Nifty 500 symbols (~500 rows, fast).
+    nifty500_only=False inserts the full NSE EQ universe (~2100 rows).
+    """
+    await _require_admin(request, session)
+
+    try:
+        from app.tasks.universe_population import populate_universe
+        result = populate_universe.delay(nifty500_only=body.nifty500_only)
+    except Exception as exc:
+        logger.error("pipeline.populate_universe_enqueue_failed", error=str(exc))
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Could not reach Celery broker. Is the worker running?",
+        )
+
+    scope = "Nifty 500 only" if body.nifty500_only else "full NSE universe"
+    logger.info("pipeline.populate_universe_queued", task_id=result.id, scope=scope)
+    return TaskEnqueuedResponse(
+        task_id=result.id,
+        message=f"Universe population enqueued ({scope}). Takes ~30–60 seconds.",
+    )
+
+
+# ── Pipeline status overview ──────────────────────────────────────────────────
+
+_ALL_TASK_NAMES = [
+    "universe_population",
+    "broker_backfill",
+    "bhavcopy",
+    "backfill",
+    "eod_ingest",
+    "ml_training",
+    "signal_generator",
+    "news_sentiment",
+]
+
+
+class TaskStatusEntry(BaseModel):
+    task_name:   str
+    status:      str
+    message:     str
+    started_at:  Optional[str] = None
+    finished_at: Optional[str] = None
+    summary:     dict = {}
+    ts:          Optional[str] = None
+
+
+@router.get("/status", response_model=list[TaskStatusEntry])
+async def pipeline_status(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    """Return last-run status for every pipeline task (admin only)."""
+    await _require_admin(request, session)
+
+    from app.tasks.task_utils import read_all_task_statuses
+
+    entries = read_all_task_statuses(_ALL_TASK_NAMES)
+    return [TaskStatusEntry(**e) for e in entries]
+

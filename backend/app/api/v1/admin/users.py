@@ -13,7 +13,7 @@ from sqlalchemy import select
 from app.core.database import get_session
 from app.core.security import decode_access_token
 from app.models.user import User
-from app.schemas.invite import InviteRequest, InviteResponse
+from app.schemas.invite import InviteRequest, InviteListItem, InviteResponse
 from app.services.invite_service import InviteService
 
 logger = structlog.get_logger(__name__)
@@ -67,3 +67,26 @@ async def invite_user(
         registration_url=registration_url,
         invite_token=raw_token,
     )
+
+
+@router.get("/users/invites", response_model=list[InviteListItem])
+async def list_invites(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    """Return the 50 most recent invites (admin only)."""
+    await _require_admin(request, session)
+    svc = InviteService(session)
+    invites = await svc.list_invites()
+    return [
+        InviteListItem(
+            id=inv.id,
+            email=inv.email,
+            status=inv.status,
+            expires_at=inv.expires_at,
+            used_at=inv.used_at,
+            revoked_at=inv.revoked_at,
+            created_at=inv.created_at,
+        )
+        for inv in invites
+    ]

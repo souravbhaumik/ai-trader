@@ -56,3 +56,10 @@ class InviteService:
 
         logger.info("invite.created", email=email, invited_by=str(invited_by))
         return invite, raw_token
+
+    async def list_invites(self, limit: int = 50) -> list[UserInvite]:
+        """Return the most recent invites, newest first."""
+        result = await self._session.execute(
+            select(UserInvite).order_by(UserInvite.created_at.desc()).limit(limit)
+        )
+        return list(result.scalars().all())

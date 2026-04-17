@@ -1,22 +1,26 @@
-"""Technical-indicator signal generation task — Phase 2.
+"""Technical-indicator + ML signal generation task — Phase 2 / Phase 3.
 
 Runs after EOD data ingestion (4:45 PM IST Mon–Fri).  Reads the last
 N days of daily OHLCV from ``ohlcv_daily``, computes three indicators,
 and upserts confirmed signals into the ``signals`` table.
 
-Indicators
-----------
-* RSI(14)       — oversold < 30 → BUY ; overbought > 70 → SELL
-* MACD(12,26,9) — signal-line crossover  (bullish → BUY ; bearish → SELL)
-* Bollinger(20,2) — close outside band (below lower → BUY ; above upper → SELL)
+Phase 3 upgrade
+---------------
+When an active LightGBM model exists in ``ml_models``, the technical
+confidence score is blended with the ML model probability and the
+Phase 4 rolling sentiment score from Redis.
 
-A symbol produces at most **one active signal per run**.  When two or
-more indicators agree the confidence is boosted.  If indicators
-conflict the signal is dropped (net confidence < threshold).
+Blend weights (configurable via env vars):
+    SIGNAL_WEIGHT_TECH      default 0.40  — pure technical indicators
+    SIGNAL_WEIGHT_ML        default 0.45  — LightGBM probability
+    SIGNAL_WEIGHT_SENTIMENT default 0.15  — Phase 4 FinBERT sentiment
+
+If no ML model is active, falls back to technical-only (Phase 2 behaviour).
 """
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -31,7 +35,7 @@ from app.tasks.celery_app import celery_app
 logger = structlog.get_logger(__name__)
 
 # ── Tunables ──────────────────────────────────────────────────────────────────
-_LOOKBACK       = 60    # calendar days fetched per symbol (enough for MACD-26)
+_LOOKBACK       = 90    # calendar days fetched per symbol (Phase 3 needs more)
 _MIN_BARS       = 28    # minimum valid rows needed (skip thin history)
 _CONFIDENCE_MIN = 0.25  # signals below this threshold are discarded
 _BATCH_SIZE     = 20    # symbols fetched from DB per loop iteration
@@ -39,7 +43,12 @@ _BUY_TARGET_PCT = 0.05  # expected upside for BUY  (5 %)
 _BUY_SL_PCT     = 0.03  # stop-loss for BUY         (3 %)
 _SELL_TARGET_PCT = 0.05 # expected downside for SELL (5 %)
 _SELL_SL_PCT     = 0.03 # stop-loss for SELL         (3 %)
-_MODEL_VERSION  = "technical-v1"
+_MODEL_VERSION  = "technical-v1"   # overridden when ML model active
+
+# ── Blend weights (Phase 3) ───────────────────────────────────────────────────
+_W_TECH      = float(os.getenv("SIGNAL_WEIGHT_TECH",      "0.40"))
+_W_ML        = float(os.getenv("SIGNAL_WEIGHT_ML",        "0.45"))
+_W_SENTIMENT = float(os.getenv("SIGNAL_WEIGHT_SENTIMENT", "0.15"))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -210,7 +219,35 @@ def _score_symbol(
 
 @celery_app.task(bind=True, name="app.tasks.signal_generator.generate_signals")
 def generate_signals(self):
-    """Compute RSI/MACD/Bollinger signals for all active symbols and persist them."""
+    """Compute signals for all active symbols and persist them.
+
+    Phase 3: blends technical indicators with LightGBM ML model probability
+    and Phase 4 sentiment score when an active model exists.
+    Falls back to technical-only mode otherwise.
+    """
+    from app.services.ml_loader import predict as ml_predict
+    from app.services.feature_engineer import build_features, FEATURE_NAMES
+
+    # ── Check if an active ML model is loaded ─────────────────────────────────
+    ml_available = ml_predict(dict.fromkeys(FEATURE_NAMES, 0.0)) is not None
+
+    # ── Prefetch all sentiment scores from Redis ──────────────────────────────
+    sentiment_cache: Dict[str, float] = {}
+    try:
+        import redis as _redis
+        from app.core.config import settings
+        r = _redis.from_url(settings.redis_url, decode_responses=True)
+        keys = r.keys("sentiment:*")
+        if keys:
+            vals = r.mget(keys)
+            for k, v in zip(keys, vals):
+                if v:
+                    import json as _json
+                    sym = k.removeprefix("sentiment:")
+                    sentiment_cache[sym] = float(_json.loads(v).get("score", 0.0))
+    except Exception as exc:
+        logger.warning("signal_generator.sentiment_prefetch_failed", error=str(exc))
+
     with get_sync_session() as session:
         # ── 1. Load active symbols ─────────────────────────────────────────────
         symbols: List[str] = [
@@ -226,7 +263,7 @@ def generate_signals(self):
         skipped  = 0
         now_ts   = datetime.utcnow()
 
-        logger.info("signal_generator.start", total_symbols=total)
+        logger.info("signal_generator.start", total_symbols=total, ml_mode=ml_available)
 
         for idx in range(0, total, _BATCH_SIZE):
             batch = symbols[idx : idx + _BATCH_SIZE]
@@ -235,7 +272,7 @@ def generate_signals(self):
                 # ── Fetch last _LOOKBACK days of OHLCV ────────────────────────
                 rows = session.execute(
                     text("""
-                        SELECT close
+                        SELECT close, high, low, volume
                         FROM   ohlcv_daily
                         WHERE  symbol = :symbol
                         ORDER  BY ts DESC
@@ -247,11 +284,68 @@ def generate_signals(self):
                     skipped += 1
                     continue
 
-                # Oldest → newest (reversed since we fetched DESC)
-                closes = [float(r[0]) for r in reversed(rows)]
+                # Oldest → newest
+                rows_asc = list(reversed(rows))
+                closes  = [float(r[0]) for r in rows_asc]
+                highs   = [float(r[1]) for r in rows_asc]
+                lows    = [float(r[2]) for r in rows_asc]
+                volumes = [float(r[3]) for r in rows_asc]
 
-                signal = _score_symbol(closes)
-                if signal is None:
+                # ── Technical signal (always computed) ────────────────────────
+                tech_signal = _score_symbol(closes)
+                if tech_signal is None:
+                    skipped += 1
+                    continue
+
+                tech_dir   = tech_signal["signal_type"]   # "BUY" | "SELL"
+                tech_conf  = tech_signal["confidence"]    # [0, 1]
+                entry      = tech_signal["entry_price"]
+                target     = tech_signal["target_price"]
+                stop_loss  = tech_signal["stop_loss"]
+                features   = tech_signal["features"]
+                model_ver  = _MODEL_VERSION
+
+                final_dir  = tech_dir
+                final_conf = tech_conf
+
+                # ── Phase 3: blend ML + sentiment ─────────────────────────────
+                if ml_available:
+                    sentiment = sentiment_cache.get(sym, 0.0)
+                    feat_vec  = build_features(sym, closes, highs, lows, volumes, sentiment)
+                    ml_result = ml_predict(feat_vec)
+
+                    if ml_result:
+                        # Always record that ML was used, even when direction is HOLD
+                        model_ver = ml_result["version"]
+
+                    if ml_result and ml_result["direction"] != "HOLD":
+                        ml_dir   = ml_result["direction"]
+                        ml_prob  = ml_result["probability"]   # [0,1] BUY probability
+                        ml_score = ml_prob if ml_dir == "BUY" else (1 - ml_prob)
+
+                        # Sentiment contribution: map [-1,1] → [0,1] for BUY polarity
+                        sent_score = (sentiment + 1) / 2
+
+                        # Convert tech confidence to direction-aligned score
+                        tech_score = tech_conf if tech_dir == "BUY" else (1 - tech_conf)
+
+                        # Weighted blend
+                        blended = (
+                            _W_TECH      * tech_score  +
+                            _W_ML        * ml_score    +
+                            _W_SENTIMENT * sent_score
+                        )
+
+                        # Direction: majority vote between tech + ML
+                        final_dir  = "BUY" if blended >= 0.5 else "SELL"
+                        final_conf = abs(blended - 0.5) * 2   # rescale to [0,1]
+                        model_ver  = ml_result["version"]
+
+                        features["ml_probability"] = round(ml_prob, 4)
+                        features["sentiment_score"] = round(sentiment, 4)
+                        features["blend_score"]     = round(blended, 4)
+
+                if final_conf < _CONFIDENCE_MIN:
                     skipped += 1
                     continue
 
@@ -279,13 +373,13 @@ def generate_signals(self):
                         "id":            str(sig_id),
                         "symbol":        sym,
                         "ts":            now_ts,
-                        "signal_type":   signal["signal_type"],
-                        "confidence":    signal["confidence"],
-                        "entry_price":   signal["entry_price"],
-                        "target_price":  signal["target_price"],
-                        "stop_loss":     signal["stop_loss"],
-                        "model_version": _MODEL_VERSION,
-                        "features":      json.dumps(signal["features"]),
+                        "signal_type":   final_dir,
+                        "confidence":    round(final_conf, 4),
+                        "entry_price":   entry,
+                        "target_price":  target,
+                        "stop_loss":     stop_loss,
+                        "model_version": model_ver,
+                        "features":      json.dumps(features),
                         "created_at":    now_ts,
                     },
                 )
@@ -296,16 +390,34 @@ def generate_signals(self):
                     from app.services.discord_service import notify_signal_sync
                     notify_signal_sync(
                         symbol=sym,
-                        signal_type=signal["signal_type"],
-                        confidence=signal["confidence"],
-                        entry=signal["entry_price"],
-                        target=signal["target_price"],
-                        sl=signal["stop_loss"],
+                        signal_type=final_dir,
+                        confidence=final_conf,
+                        entry=entry,
+                        target=target,
+                        sl=stop_loss,
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("signal_generator.discord_failed", error=str(exc))
 
-            session.commit()
+                # ── Paper trade auto-execution (Phase 5, best-effort) ──────────
+                try:
+                    from app.services.paper_trade_service import auto_paper_trade
+                    placed = auto_paper_trade(
+                        session,
+                        signal_id=str(sig_id),
+                        symbol=sym,
+                        direction=final_dir,
+                        entry_price=entry,
+                        target_price=target,
+                        stop_loss=stop_loss,
+                    )
+                    if placed:
+                        logger.info("paper_trade.auto_queued", symbol=sym, users=placed)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("paper_trade.auto_failed", error=str(exc))
 
-        logger.info("signal_generator.done", inserted=inserted, skipped=skipped)
+            session.commit()   # commits signals + paper trades for the batch
+
+        logger.info("signal_generator.done", inserted=inserted, skipped=skipped,
+                    ml_mode=ml_available)
         return {"status": "ok", "inserted": inserted, "skipped": skipped}

@@ -66,6 +66,21 @@ class Settings(BaseSettings):
     # ── Discord optional webhook ────────────────────────────────────────────
     discord_webhook_url: str = ""
 
+    # ── Broker API ───────────────────────────────────────────────────────────
+    broker_name: str = ""          # "angel_one" | "upstox" | ""
+
+    # Angel One (SmartAPI)
+    angel_api_key: str = ""
+    angel_api_secret: str = ""
+    angel_client_id: str = ""
+    angel_mpin: str = ""
+    angel_totp_secret: str = ""
+
+    # Upstox
+    upstox_api_key: str = ""
+    upstox_api_secret: str = ""
+    upstox_redirect_uri: str = ""
+
     # ── CORS & URLs ───────────────────────────────────────────────────────────
     allowed_origins: str = "http://localhost:3000"
     frontend_url: str = "http://localhost:3000"

@@ -22,9 +22,10 @@ from app.tasks.celery_app import celery_app
 
 logger = structlog.get_logger(__name__)
 
-_PROGRESS_KEY = "backfill:progress"
-_BATCH_SIZE   = 10   # symbols per yfinance batch call
-_DELAY_SECS   = 2.0  # pause between batches to respect rate limits
+_PROGRESS_KEY  = "backfill:progress"
+_DELAY_SECS    = 3.0   # seconds between individual downloads
+_RETRY_DELAY   = 60.0  # seconds to wait after a rate-limit hit
+_MAX_RETRIES   = 3     # retries per symbol on rate-limit
 
 
 def _get_redis():
@@ -52,9 +53,41 @@ def backfill_universe(self, period: str = "2y", force: bool = False):
         force:  If True, re-download even if data already exists.
     """
     import yfinance as yf
-    import pandas as pd
 
     r = _get_redis()
+
+    def _download_sym(sym: str) -> list[dict]:
+        """Download one symbol with .NS suffix, retry on rate limit."""
+        ticker_str = f"{sym}.NS"
+        for attempt in range(_MAX_RETRIES):
+            try:
+                df = yf.Ticker(ticker_str).history(period=period, auto_adjust=True)
+                if df is None or df.empty:
+                    return []
+                rows = []
+                for ts, row in df.iterrows():
+                    rows.append({
+                        "symbol": sym,
+                        "ts":     ts.to_pydatetime().replace(tzinfo=None),
+                        "open":   float(row["Open"]),
+                        "high":   float(row["High"]),
+                        "low":    float(row["Low"]),
+                        "close":  float(row["Close"]),
+                        "volume": int(row.get("Volume") or 0),
+                        "source": "yfinance",
+                    })
+                return rows
+            except Exception as e:
+                err = str(e)
+                if "RateLimit" in err or "Too Many Requests" in err:
+                    if attempt < _MAX_RETRIES - 1:
+                        logger.warning("backfill_rate_limit_retry", sym=sym, attempt=attempt + 1)
+                        time.sleep(_RETRY_DELAY)
+                    else:
+                        raise
+                else:
+                    raise
+        return []
 
     try:
         with get_sync_session() as session:
@@ -81,96 +114,41 @@ def backfill_universe(self, period: str = "2y", force: bool = False):
             skipped  = 0
             errors   = 0
 
-            for batch_start in range(0, total, _BATCH_SIZE):
-                batch = all_symbols[batch_start: batch_start + _BATCH_SIZE]
-                pct   = int((batch_start / total) * 95)
-                msg   = f"Downloading {batch_start + 1}–{min(batch_start + _BATCH_SIZE, total)} / {total}..."
-                _set_progress(r, pct, msg, "running")
+            for idx, sym in enumerate(all_symbols):
+                pct = int((idx / total) * 95)
+                if idx % 50 == 0:
+                    _set_progress(r, pct, f"Downloading {idx + 1}/{total}…", "running")
 
                 try:
-                    data = yf.download(
-                        batch,
-                        period=period,
-                        interval="1d",
-                        progress=False,
-                        auto_adjust=True,
-                        threads=True,
-                    )
-                    if data is None or data.empty:
-                        skipped += len(batch)
-                        continue
-
-                    # ── Normalise yfinance output ─────────────────────────────
-                    if not isinstance(data.columns, pd.MultiIndex):
-                        if len(batch) == 1:
-                            sym_name = batch[0]
-                            data = pd.concat({sym_name: data}, axis=1).swaplevel(axis=1)
-                            data.columns = pd.MultiIndex.from_tuples(
-                                [(pt, sym_name) for pt in data.columns.get_level_values(0)]
+                    rows = _download_sym(sym)
+                    if not rows:
+                        skipped += 1
+                        logger.debug("backfill_no_data", sym=sym)
+                    else:
+                        with get_sync_session() as session:
+                            session.execute(
+                                text("""
+                                    INSERT INTO ohlcv_daily
+                                        (symbol, ts, open, high, low, close, volume, source)
+                                    VALUES
+                                        (:symbol, :ts, :open, :high, :low, :close, :volume, :source)
+                                    ON CONFLICT (symbol, ts) DO UPDATE SET
+                                        open   = EXCLUDED.open,
+                                        high   = EXCLUDED.high,
+                                        low    = EXCLUDED.low,
+                                        close  = EXCLUDED.close,
+                                        volume = EXCLUDED.volume,
+                                        source = EXCLUDED.source
+                                """),
+                                rows,
                             )
-                        else:
-                            logger.warning(
-                                "backfill_batch_flat_result_skipped",
-                                batch_preview=batch[:3],
-                                reason="yfinance returned non-MultiIndex for multi-sym batch",
-                            )
-                            skipped += len(batch)
-                            continue
-
-                    close_df  = data["Close"]
-                    open_df   = data["Open"]
-                    high_df   = data["High"]
-                    low_df    = data["Low"]
-                    volume_df = data["Volume"]
-
-                    rows: list[dict] = []
-
-                    for sym in batch:
-                        try:
-                            if sym not in close_df.columns:
-                                skipped += 1
-                                continue
-                            c = close_df[sym]; o = open_df[sym]; h = high_df[sym]
-                            lo = low_df[sym]; v = volume_df[sym]
-
-                            for ts, close_val in c.dropna().items():
-                                rows.append({
-                                    "symbol": sym,
-                                    "ts":     ts.to_pydatetime().replace(tzinfo=None),
-                                    "open":   float(o.get(ts, close_val)),
-                                    "high":   float(h.get(ts, close_val)),
-                                    "low":    float(lo.get(ts, close_val)),
-                                    "close":  float(close_val),
-                                    "volume": int(v.get(ts, 0) or 0),
-                                    "source": "yfinance",
-                                })
-                            inserted += 1
-                        except Exception as e:
-                            logger.warning("backfill_symbol_error", sym=sym, error=str(e))
-                            errors += 1
-
-                    if rows:
-                        session.execute(
-                            text("""
-                                INSERT INTO ohlcv_daily
-                                    (symbol, ts, open, high, low, close, volume, source)
-                                VALUES
-                                    (:symbol, :ts, :open, :high, :low, :close, :volume, :source)
-                                ON CONFLICT (symbol, ts) DO UPDATE SET
-                                    open   = EXCLUDED.open,
-                                    high   = EXCLUDED.high,
-                                    low    = EXCLUDED.low,
-                                    close  = EXCLUDED.close,
-                                    volume = EXCLUDED.volume,
-                                    source = EXCLUDED.source
-                            """),
-                            rows,
-                        )
-                        session.commit()
+                            session.commit()
+                        inserted += 1
+                        logger.debug("backfill_sym_ok", sym=sym, rows=len(rows))
 
                 except Exception as e:
-                    logger.error("backfill_batch_error", batch=batch[:3], error=str(e))
-                    errors += len(batch)
+                    logger.warning("backfill_symbol_error", sym=sym, error=str(e))
+                    errors += 1
 
                 time.sleep(_DELAY_SECS)
 

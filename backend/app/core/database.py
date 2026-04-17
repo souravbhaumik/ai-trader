@@ -47,6 +47,10 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
             raise
 
 
+# Alias for compatibility with code that imports get_async_session
+get_async_session = get_session
+
+
 # ── Sync engine (Celery workers) ──────────────────────────────────────────
 sync_engine = create_engine(
     settings.sync_database_url,

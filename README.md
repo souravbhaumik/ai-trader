@@ -101,11 +101,66 @@ docker-compose.yml     Services: postgres, redis, backend, frontend
 - [x] React frontend with auth guards, login/register pages, Zustand auth store
 - [x] Axios auto-refresh interceptor
 
-## Coming in Phase 2
+## Phase 2 Features (Complete)
 
-- Market data ingestion (TimescaleDB hypertables, WebSocket price streaming)
-- ML inference pipeline (LightGBM, TFT, FinBERT, LSTM Autoencoder)
-- Trade execution (paper + live via Angel One / Upstox)
-- Celery workers + Redis task queue
-- TOTP setup endpoint for admin
-- Discord webhook alerts
+- [x] Market data ingestion (TimescaleDB hypertables, Celery EOD ingest)
+- [x] WebSocket price streaming with Redis fan-out
+- [x] Signal generation pipeline
+- [x] Celery workers + Redis task queue
+- [x] TanStack Query on the frontend (stale-while-revalidate)
+- [x] Alembic migration init container (db-migrate)
+- [x] Circuit-breaker pattern on broker API calls
+
+## Phase 4 Features — News Sentiment Pipeline (Complete)
+
+- [x] RSS feed fetcher (ET Markets, Moneycontrol, Business Standard, Livemint, NSE, BSE corporate)
+- [x] Google News fetcher (gnews, top 50 symbols by market cap)
+- [x] NER entity extraction (spaCy `en_core_web_sm`) + fuzzy symbol mapping (rapidfuzz)
+- [x] FinBERT batch inference (ProsusAI/finbert, CPU default / `SENTIMENT_DEVICE=cuda` for GPU)
+- [x] `news_sentiment` TimescaleDB hypertable (1-day chunks, dedup by URL+symbol)
+- [x] Celery Beat task every 15 min Mon–Fri 9:00 AM – 3:45 PM IST
+- [x] Redis rolling 24-h weighted sentiment cache per symbol (`sentiment:<SYM>`, 2-h TTL)
+- [x] `GET /api/v1/news/sentiment?symbol=X` — aggregated score from cache (DB fallback)
+- [x] `GET /api/v1/news/feed?symbol=X&limit=20` — recent headlines with per-article scores
+
+## Phase 3 Features — AI/ML Pipeline (Complete)
+
+- [x] Feature engineering: RSI(14), MACD histogram, Bollinger %B, ATR%, OBV trend, ADX(14), volume ratio, SMA20/50 deviation, Phase 4 sentiment score
+- [x] LightGBM binary classifier — trained on sliding-window OHLCV features
+- [x] `ml_models` table — tracks model versions, artifact paths, metrics, active flag
+- [x] `model_predictions` TimescaleDB hypertable — per-symbol ML output audit trail
+- [x] Signal generator upgraded: blends technical (40%) + ML probability (45%) + sentiment (15%)
+- [x] Graceful fallback to technical-only when no active model exists
+- [x] MLflow integration — optional; set `MLFLOW_TRACKING_URI` env var to enable
+- [x] Admin endpoints: `POST /train-model`, `GET /models`, `POST /models/{id}/promote`, `POST /models/{id}/rollback`
+- [x] In-process ML model loader with 5-min auto-reload on version change
+
+## Phase 5 Features — Paper Trading + Execution (Complete)
+
+- [x] `paper_trades` TimescaleDB table — per-user simulated trade ledger
+- [x] Paper balance management in `user_settings` — deducted on open, restored + P&L on close
+- [x] Auto-execution: when signals fire, paper trades placed for all `trading_mode='paper'` users (enable via `PAPER_AUTO_TRADE=true`)
+- [x] `GET /api/v1/portfolio/paper/summary` — cash balance, realized P&L, win rate, open positions
+- [x] `GET /api/v1/portfolio/paper/positions` — open paper trades
+- [x] `GET /api/v1/portfolio/paper/history?limit=N` — closed trade history
+- [x] `POST /api/v1/portfolio/paper/orders` — manually place a paper trade
+- [x] `POST /api/v1/portfolio/paper/orders/{id}/close` — close position (auto-fetches live price via yfinance if not provided)
+
+## Coming in Phase 5 (Live Execution + Advanced ML)
+
+- Live order execution via Angel One SmartAPI (requires broker account + `BROKER_NAME=angel_one`)
+- Live order execution via Upstox (requires Upstox account + OAuth redirect)
+- LSTM autoencoder for anomaly detection on OHLCV sequences (requires GPU recommended)
+- TFT (Temporal Fusion Transformer) multi-step price forecasting (requires GPU recommended)
+- Discord webhook alerts for paper/live order fills (extend `discord_service.py`)
+
+## Coming in Phase 3 (AI/ML)
+
+- ~~LightGBM / XGBoost signal models trained on technical features~~ ✅ Done (Phase 3)
+- ~~LSTM autoencoder for anomaly detection~~ → Phase 5 (GPU recommended)
+- ~~TFT (Temporal Fusion Transformer) price forecasting~~ → Phase 5 (GPU recommended)
+- ~~Model versioning with MLflow~~ ✅ Done (Phase 3)
+- ~~Trade execution (paper + live via Angel One / Upstox)~~ → Paper ✅ Done (Phase 5) · Live → Phase 5
+- ~~TOTP setup endpoint for admin~~ ✅ Done (Phase 1)
+- ~~Discord webhook alerts~~ ✅ Done (Phase 3)
+

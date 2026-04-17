@@ -19,8 +19,13 @@ celery_app = Celery(
     backend=_backend_url,
     include=[
         "app.tasks.backfill",
+        "app.tasks.bhavcopy",
+        "app.tasks.broker_backfill",
         "app.tasks.eod_ingest",
+        "app.tasks.ml_training",
+        "app.tasks.news_sentiment",
         "app.tasks.signal_generator",
+        "app.tasks.universe_population",
     ],
 )
 
@@ -52,8 +57,17 @@ celery_app.conf.beat_schedule = {
         "task":     "app.tasks.eod_ingest.ingest_eod",
         "schedule": crontab(hour=16, minute=30, day_of_week="1-5"),  # Mon–Fri 4:30 PM IST
     },
+    "bhavcopy-daily": {
+        "task":     "app.tasks.bhavcopy.ingest_bhavcopy",
+        "schedule": crontab(hour=19, minute=30, day_of_week="1-5"),  # Mon–Fri 7:30 PM IST
+    },
     "signal-generation-daily": {
         "task":     "app.tasks.signal_generator.generate_signals",
         "schedule": crontab(hour=16, minute=45, day_of_week="1-5"),  # Mon–Fri 4:45 PM IST
+    },
+    # News sentiment pipeline — every 15 min during market hours
+    "news-sentiment-pipeline": {
+        "task":     "app.tasks.news_sentiment.fetch_news_sentiment",
+        "schedule": crontab(hour="9-15", minute="*/15", day_of_week="1-5"),  # Mon–Fri 9:00 AM – 3:45 PM IST
     },
 }
