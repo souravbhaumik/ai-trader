@@ -141,18 +141,24 @@ async def open_trade(
     signal_id: Optional[uuid.UUID] = None,
     notes: Optional[str] = None,
 ) -> dict:
-    """Place a manual paper trade. Raises ValueError on insufficient balance."""
-    cost = entry_price * qty
-
-    # Check balance
-    row = await session.execute(
-        text("SELECT paper_balance FROM user_settings WHERE user_id = :uid"),
+    """Place a manual paper trade. Raises ValueError on insufficient balance or wrong mode."""
+    # ── SAFETY: always re-read trading_mode from DB, never trust caller ────────
+    mode_row = await session.execute(
+        text("SELECT trading_mode, paper_balance FROM user_settings WHERE user_id = :uid"),
         {"uid": str(user_id)},
     )
-    row = row.first()
-    if row is None:
+    mode_row = mode_row.first()
+    if mode_row is None:
         raise ValueError("User settings not found.")
-    balance = Decimal(str(row[0]))
+    trading_mode, balance = mode_row[0], Decimal(str(mode_row[1]))
+
+    if trading_mode != "paper":
+        raise ValueError(
+            f"User trading_mode is '{trading_mode}', not 'paper'. "
+            "Live execution is not yet available via this endpoint."
+        )
+
+    cost = entry_price * qty
     if cost > balance:
         raise ValueError(
             f"Insufficient paper balance ₹{balance:,.2f} for trade cost ₹{cost:,.2f}."

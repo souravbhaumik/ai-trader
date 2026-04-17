@@ -25,6 +25,15 @@ frontend/.vite/
 postgres_data/
 redis_data/
 
+# ML model artifacts — never commit binaries to git
+# Store in S3/DigitalOcean Spaces or a persistent Docker volume instead
+backend/models/
+*.pkl
+*.h5
+*.pt
+*.onnx
+*.joblib
+
 # Logs
 logs/
 *.log
