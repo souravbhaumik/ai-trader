@@ -116,18 +116,6 @@ def ingest_eod():
         return {"status": "done", "inserted": total_inserted}
 
 
-@celery_app.task(name="app.tasks.eod_ingest.ingest_eod")
-def ingest_eod():
-    """Fetch yesterday's (or today's after market close) data for all symbols."""
-    import yfinance as yf
-    from sqlalchemy import text
-
-    from app.core.database import get_sync_session
-
-    with get_sync_session() as session:
-        return _run_eod(session)
-
-
 def _run_eod(session):
     from sqlalchemy import text
     import yfinance as yf

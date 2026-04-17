@@ -6,6 +6,7 @@ from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request, status
 from jose import JWTError
+from redis.exceptions import ConnectionError as RedisConnectionError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -39,9 +40,17 @@ async def get_current_user(
     # ── Blocklist check: reject tokens whose JTI was revoked on logout ────────
     jti = payload.get("jti")
     if jti:
-        redis = get_redis()
-        if await redis.exists(f"{_BLOCKLIST_PREFIX}{jti}"):
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token has been revoked.")
+        try:
+            redis = get_redis()
+            if await redis.exists(f"{_BLOCKLIST_PREFIX}{jti}"):
+                raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token has been revoked.")
+        except HTTPException:
+            raise
+        except RedisConnectionError:
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "Auth service degraded — please try again shortly.",
+            )
 
     user_id = uuid.UUID(payload["sub"])
     result = await session.execute(select(User).where(User.id == user_id))
