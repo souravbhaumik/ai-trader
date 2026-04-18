@@ -65,6 +65,97 @@ The response includes a `registration_url` — share it with the user. They visi
 
 ---
 
+## Re-imaging & Deployment Commands
+
+### Rebuild a single service (e.g. after changing backend code or `requirements.txt`)
+
+```bash
+docker compose build backend
+docker compose up -d backend
+```
+
+### Rebuild all custom images and restart everything
+
+```bash
+docker compose build
+docker compose up -d
+```
+
+### Full nuclear re-image (wipe containers + images, keep data volumes)
+
+```bash
+# Stop and remove all containers + orphaned containers
+docker compose down --remove-orphans
+
+# Rebuild every image from scratch (no layer cache)
+docker compose build --no-cache
+
+# Bring everything back up
+docker compose up -d
+```
+
+### Full factory reset (wipe ALL data — DB, Redis, model artifacts, HuggingFace cache)
+
+> **Destructive — cannot be undone.** Only do this to start completely fresh.
+
+```bash
+docker compose down --volumes --remove-orphans
+docker compose build --no-cache
+docker compose up -d
+```
+
+### Apply new database migrations only
+
+```bash
+docker compose exec backend alembic upgrade head
+```
+
+### Re-seed the admin user (after a factory reset)
+
+```bash
+docker compose exec backend python scripts/seed_admin_user.py
+```
+
+### Restart individual services without rebuilding
+
+```bash
+# Restart backend + celery worker (e.g. after editing Python source)
+docker compose restart backend celery-worker
+
+# Restart everything
+docker compose restart
+```
+
+### Tail logs for a service
+
+```bash
+docker compose logs -f backend
+docker compose logs -f celery-worker
+docker compose logs -f celery-beat
+```
+
+### Check container health
+
+```bash
+docker compose ps
+```
+
+### Trigger a manual model training run
+
+```bash
+docker compose exec celery-worker sh -c \
+  "PYTHONPATH=/app celery -A app.tasks.celery_app call app.tasks.ml_training.train_model"
+```
+
+### Trigger a manual Bhavcopy ingest
+
+```bash
+docker compose exec celery-worker sh -c \
+  "PYTHONPATH=/app celery -A app.tasks.celery_app call app.tasks.bhavcopy.ingest_bhavcopy"
+```
+
+---
+
 ## Architecture
 
 See [DESIGN.md](DESIGN.md), [DATABASE.md](DATABASE.md), and [API.md](API.md).

@@ -17,14 +17,13 @@ Symbol master (symbol → token mapping):
 from __future__ import annotations
 
 import time
-from datetime import date, timedelta
-from urllib.parse import urlparse
+from datetime import date, datetime, timedelta
 
-import psycopg2
 import requests
 import structlog
-from psycopg2.extras import execute_values
+from sqlalchemy import text
 
+from app.core.database import get_sync_session
 from app.tasks.celery_app import celery_app
 from app.tasks.task_utils import now_iso, write_task_status
 
@@ -93,8 +92,10 @@ def _fetch_candles(smart, token: str, from_date: date, to_date: date) -> list[di
             if resp.get("status") and resp.get("data"):
                 for row in resp["data"]:
                     ts, o, h, l, c, v = row
+                    # ts format from Angel One: "2024-01-15T09:15:00+0530" — take date only
+                    trade_dt = datetime.strptime(ts[:10], "%Y-%m-%d").replace(hour=0, minute=0, second=0)
                     results.append({
-                        "trade_date": ts[:10],
+                        "ts": trade_dt,
                         "open": float(o), "high": float(h),
                         "low":  float(l), "close": float(c),
                         "volume": int(v),
@@ -106,32 +107,30 @@ def _fetch_candles(smart, token: str, from_date: date, to_date: date) -> list[di
     return results
 
 
-def _upsert_ohlcv(conn, symbol: str, rows: list[dict]) -> int:
-    """Bulk-upsert OHLCV rows for one symbol; returns count upserted."""
+def _upsert_ohlcv(session, symbol: str, rows: list[dict]) -> int:
+    """Bulk-upsert OHLCV rows for one symbol via SQLAlchemy; returns count upserted."""
     if not rows:
         return 0
-    records = [
-        (symbol, r["trade_date"], r["open"], r["high"], r["low"], r["close"], r["volume"], "angel_one")
-        for r in rows
-    ]
-    with conn.cursor() as cur:
-        execute_values(
-            cur,
-            """
-            INSERT INTO ohlcv_daily (symbol, trade_date, open, high, low, close, volume, source)
-            VALUES %s
-            ON CONFLICT (symbol, trade_date) DO UPDATE SET
+    session.execute(
+        text("""
+            INSERT INTO ohlcv_daily (symbol, ts, open, high, low, close, volume, source)
+            VALUES (:symbol, :ts, :open, :high, :low, :close, :volume, :source)
+            ON CONFLICT (symbol, ts) DO UPDATE SET
                 open   = EXCLUDED.open,
                 high   = EXCLUDED.high,
                 low    = EXCLUDED.low,
                 close  = EXCLUDED.close,
                 volume = EXCLUDED.volume,
                 source = EXCLUDED.source
-            """,
-            records,
-        )
-    conn.commit()
-    return len(records)
+        """),
+        [
+            {"symbol": symbol, "ts": r["ts"], "open": r["open"], "high": r["high"],
+             "low": r["low"], "close": r["close"], "volume": r["volume"], "source": "angel_one"}
+            for r in rows
+        ],
+    )
+    session.commit()
+    return len(rows)
 
 
 # ── Celery task ───────────────────────────────────────────────────────────────
@@ -184,59 +183,51 @@ def run_broker_backfill(self, period: str = "1y") -> dict:
         write_task_status(_TASK_NAME, "error", msg, started_at=started, finished_at=now_iso())
         return {"status": "scrip_master_failed", "message": msg}
 
-    # ── 4. Load symbols from stock_universe ───────────────────────────────────
-    db_url = settings.sync_database_url.replace("postgresql+psycopg2://", "postgresql://")
-    parsed = urlparse(db_url)
-    conn = psycopg2.connect(
-        host=parsed.hostname, port=parsed.port or 5432,
-        dbname=parsed.path.lstrip("/"),
-        user=parsed.username, password=parsed.password,
-    )
+    # ── 4. Load symbols + backfill via SQLAlchemy session ────────────────────
+    with get_sync_session() as session:
+        symbols = [
+            row[0] for row in session.execute(
+                text("SELECT symbol FROM stock_universe WHERE is_active = TRUE ORDER BY symbol")
+            ).fetchall()
+        ]
 
-    with conn.cursor() as cur:
-        cur.execute("SELECT symbol FROM stock_universe WHERE is_active = TRUE ORDER BY symbol")
-        symbols = [row[0] for row in cur.fetchall()]
+        if not symbols:
+            msg = "stock_universe is empty. Run 'Populate Universe' from admin panel first."
+            write_task_status(_TASK_NAME, "error", msg, started_at=started, finished_at=now_iso())
+            return {"status": "no_symbols", "message": msg}
 
-    if not symbols:
-        msg = "stock_universe is empty. Run 'Populate Universe' from admin panel first."
-        write_task_status(_TASK_NAME, "error", msg, started_at=started, finished_at=now_iso())
-        conn.close()
-        return {"status": "no_symbols", "message": msg}
+        # ── 5. Backfill each symbol ───────────────────────────────────────────
+        days = _PERIOD_DAYS.get(period, 365)
+        to_date = date.today()
+        from_date = to_date - timedelta(days=days)
+        total = len(symbols)
+        done = skipped = rows_inserted = 0
 
-    # ── 5. Backfill each symbol ───────────────────────────────────────────────
-    days = _PERIOD_DAYS.get(period, 365)
-    to_date = date.today()
-    from_date = to_date - timedelta(days=days)
-    total = len(symbols)
-    done = skipped = rows_inserted = 0
+        write_task_status(
+            _TASK_NAME, "running",
+            f"Backfilling {total} symbols ({period}) via Angel One…",
+            started_at=started,
+            summary={"total": total, "done": 0, "skipped": 0, "rows": 0},
+        )
 
-    write_task_status(
-        _TASK_NAME, "running",
-        f"Backfilling {total} symbols ({period}) via Angel One…",
-        started_at=started,
-        summary={"total": total, "done": 0, "skipped": 0, "rows": 0},
-    )
+        for symbol in symbols:
+            token = token_map.get(symbol)
+            if not token:
+                skipped += 1
+                continue
 
-    for symbol in symbols:
-        token = token_map.get(symbol)
-        if not token:
-            skipped += 1
-            continue
+            rows = _fetch_candles(smart, token, from_date, to_date)
+            rows_inserted += _upsert_ohlcv(session, symbol, rows)
+            done += 1
 
-        rows = _fetch_candles(smart, token, from_date, to_date)
-        rows_inserted += _upsert_ohlcv(conn, symbol, rows)
-        done += 1
-
-        if done % 10 == 0:
-            write_task_status(
-                _TASK_NAME, "running",
-                f"Progress: {done}/{total} symbols…",
-                started_at=started,
-                summary={"total": total, "done": done, "skipped": skipped, "rows": rows_inserted},
-            )
-            logger.info("angel_one.progress", done=done, total=total, rows=rows_inserted)
-
-    conn.close()
+            if done % 10 == 0:
+                write_task_status(
+                    _TASK_NAME, "running",
+                    f"Progress: {done}/{total} symbols…",
+                    started_at=started,
+                    summary={"total": total, "done": done, "skipped": skipped, "rows": rows_inserted},
+                )
+                logger.info("angel_one.progress", done=done, total=total, rows=rows_inserted)
 
     # ── 6. Logout ─────────────────────────────────────────────────────────────
     try:

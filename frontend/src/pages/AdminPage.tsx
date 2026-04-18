@@ -126,6 +126,7 @@ function PipelinePanel() {
       ])
       setEntries(s.data)
       setModels(m.data)
+      return s.data
     } catch { /* silent */ }
   }
 
@@ -133,7 +134,14 @@ function PipelinePanel() {
     refresh()
     apiClient.get<BackfillProgress>('/admin/pipeline/backfill/progress')
       .then(r => setBfProgress(r.data)).catch(() => {})
-    return () => { if (pollRef.current) clearInterval(pollRef.current) }
+
+    // Auto-poll every 3s while any task is running
+    const autoPoll = setInterval(async () => {
+      const data = await refresh()
+      if (data && !data.some(e => e.status === 'running')) clearInterval(autoPoll)
+    }, 3000)
+
+    return () => { clearInterval(autoPoll); if (pollRef.current) clearInterval(pollRef.current) }
   }, [])
 
   const startLegacyBackfill = async () => {
@@ -329,6 +337,23 @@ function PipelinePanel() {
                 {entry?.message && entry.status !== 'idle' && (
                   <div style={{ fontSize:11, color:'var(--text-muted)', marginBottom:6, fontStyle:'italic' }}>{entry.message}</div>
                 )}
+                {/* Progress bar for long-running tasks with done/total in summary */}
+                {entry?.status === 'running' && typeof entry.summary?.total === 'number' && (entry.summary.total as number) > 0 && (() => {
+                  const done  = (entry.summary.done  as number) ?? 0
+                  const total = entry.summary.total  as number
+                  const pct   = Math.round((done / total) * 100)
+                  return (
+                    <div style={{ marginBottom:8 }}>
+                      <div style={{ background:'var(--bg-hover)', borderRadius:6, overflow:'hidden', height:5, marginBottom:3 }}>
+                        <div style={{ width:`${pct}%`, height:'100%', background:'var(--blue)', transition:'width 0.5s ease' }}/>
+                      </div>
+                      <div style={{ fontSize:10, color:'var(--text-muted)', display:'flex', justifyContent:'space-between' }}>
+                        <span>{done} / {total} symbols</span>
+                        <span>{pct}%{typeof entry.summary.rows === 'number' ? ` · ${(entry.summary.rows as number).toLocaleString()} rows` : ''}</span>
+                      </div>
+                    </div>
+                  )
+                })()}
                 {step.actions}
               </div>
               {entry?.ts && (
