@@ -1444,6 +1444,8 @@ signals (
 
 ### 8.2 Redis (In-Memory / Cache)
 
+> **Note:** Pipeline task **status** is stored in PostgreSQL (`pipeline_task_status` table), not Redis. Redis holds only ephemeral per-task log lines.
+
 | Key Pattern                  | Value                          | TTL        | Purpose                          |
 |------------------------------|--------------------------------|------------|----------------------------------|
 | `price:ltp:{symbol}`         | `{ltp, change, timestamp}`     | 30s        | Latest tick for screener/API     |
@@ -1456,6 +1458,7 @@ signals (
 | `ratelimit:{ip}:{endpoint}`  | Request count                  | 1 min      | Rate limiting — key uses **true client IP** extracted from `CF-Connecting-IP` header (Cloudflare) or `X-Forwarded-For` (generic proxy), not the proxy/tunnel IP. FastAPI must be configured with `ProxyHeadersMiddleware` (or slowapi's `get_remote_address` override) to trust and extract the real IP. Without this, one user's rate limit blocks the entire platform. |
 | `idempotency:{user_id}:{key}` | `{order_id, status}`          | 5 min      | Duplicate order prevention — client sends `Idempotency-Key` UUID header per order attempt; server returns cached response on retry instead of re-executing |
 | `otp:live_trading:{user_id}` | 6-digit OTP string             | 600s       | Single-use OTP for live trading enablement (`POST /users/me/live-trading/enable` → `confirm`). Key is deleted immediately on first successful verification; TTL expiry = OTP expiry. |
+| `pipeline:logs:{task_name}`  | List of structured log lines   | 7 days     | Per-task log lines (capped at 500) for the Admin pipeline log viewer. Written by `append_task_log()` in `task_utils.py`. |
 | `pub:prices`                 | Pub/Sub channel                | —          | Broadcasting live prices         |
 | `pub:signals`                | Pub/Sub channel                | —          | Broadcasting new signals         |
 
@@ -1901,10 +1904,14 @@ Real-time overview of the entire system. Auto-refreshes every 30 seconds via Web
 - Redis orderbook key count (should be ~500 during market hours, 0 outside)
 
 **Pipeline status:**
+- Task status is stored in the `pipeline_task_status` PostgreSQL table (one row per task), read by `GET /admin/pipeline/status`.
+- Status values: `idle` · `running` · `done` · `error` · `unknown`
+- `unknown` is written at FastAPI startup for any task that was `running` when the previous process was killed — durable across container restarts, no time-based heuristics.
+- Task log lines (structured, per-task) are stored as ephemeral Redis lists (`pipeline:logs:{task_name}`, capped at 500 entries, 7-day TTL) and read by `GET /admin/pipeline/{task_name}/logs`.
+- Pipeline panel in Admin UI shows status badge per task + "View Logs" button opening a TaskLogModal (auto-polls every 3 s while running).
 - Last `generate_signals` run: timestamp, duration, signal count
 - Last `fetch_news_sentiment` run: timestamp, article count, per-source status
 - Last `fetch_bhavcopy` run: date ingested, file date match status
-- `generate_signals` Redis lock: HELD (by which worker, how long) | FREE
 - News source circuit breaker table: each of 9 sources showing HEALTHY / BACKOFF / DISABLED + time until next retry
 
 **Today's summary:**

@@ -1,21 +1,25 @@
-import { useState, FormEvent, useEffect, useRef, useCallback } from 'react'
+import { useState, FormEvent, useEffect, useCallback, useRef } from 'react'
 import {
   Database, Server, Cpu, UserPlus, Copy, Check, Users, Play,
   RefreshCw, Activity, Globe, Layers, ExternalLink,
   Clock, CheckCircle, XCircle, Loader, X, Search, ChevronRight,
-  Key, Table2, BarChart2, Terminal,
+  Key, Table2, BarChart2, Terminal, Trash2, TrendingUp, HelpCircle,
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { apiClient } from '../api/client'
 
-interface InviteResult { registration_url: string; invite_token: string; email: string; expires_at: string }
-
-interface BackfillProgress {
-  pct: number
-  message: string
-  status: 'running' | 'done' | 'error' | 'idle'
-  ts?: string
+interface UserListItem {
+  id: string
+  email: string
+  full_name: string | null
+  role: string
+  is_active: boolean
+  is_totp_configured: boolean
+  last_login_at: string | null
+  created_at: string
 }
+
+interface InviteResult { registration_url: string; invite_token: string; email: string; expires_at: string }
 
 interface TaskResult { task_id: string; message: string }
 
@@ -42,12 +46,18 @@ interface ModelInfo {
 
 interface TaskStatusEntry {
   task_name: string
-  status: 'running' | 'done' | 'error' | 'idle'
+  status: 'running' | 'done' | 'error' | 'idle' | 'unknown'
   message: string
   started_at?: string
   finished_at?: string
   summary: Record<string, unknown>
   ts?: string
+}
+
+interface TaskLogEntry {
+  ts: string
+  level: 'info' | 'error' | 'warn'
+  msg: string
 }
 
 // ── Simple one-shot trigger button ───────────────────────────────────────────
@@ -89,10 +99,11 @@ function TriggerBtn({
 // ── Pipeline task status badge ────────────────────────────────────────────────
 function StatusBadge({ status }: { status: string }) {
   const cfg: Record<string, { color: string; icon: React.ReactNode }> = {
-    done:    { color: 'var(--green)', icon: <CheckCircle size={12}/> },
-    running: { color: 'var(--blue)',  icon: <Loader size={12}/> },
-    error:   { color: 'var(--red)',   icon: <XCircle size={12}/> },
+    done:    { color: 'var(--green)',      icon: <CheckCircle size={12}/> },
+    running: { color: 'var(--blue)',       icon: <Loader size={12}/> },
+    error:   { color: 'var(--red)',        icon: <XCircle size={12}/> },
     idle:    { color: 'var(--text-muted)', icon: <Clock size={12}/> },
+    unknown: { color: 'var(--text-muted)', icon: <HelpCircle size={12}/> },
   }
   const { color, icon } = cfg[status] ?? cfg.idle
   return (
@@ -102,19 +113,137 @@ function StatusBadge({ status }: { status: string }) {
   )
 }
 
+// ── Task Log Modal ────────────────────────────────────────────────────────────
+function TaskLogModal({
+  taskName, taskLabel, taskStatus, onClose,
+}: {
+  taskName: string; taskLabel: string; taskStatus: string; onClose: () => void
+}) {
+  const [logs, setLogs] = useState<TaskLogEntry[]>([])
+  const logBoxRef = useRef<HTMLDivElement | null>(null)
+  const pollRef   = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  const fetchLogs = async (scrollBottom = false) => {
+    try {
+      const { data } = await apiClient.get<TaskLogEntry[]>(`/admin/pipeline/${taskName}/logs?limit=500`)
+      setLogs(data)
+      if (scrollBottom && logBoxRef.current) {
+        logBoxRef.current.scrollTop = logBoxRef.current.scrollHeight
+      }
+    } catch { /* silent */ }
+  }
+
+  useEffect(() => {
+    fetchLogs(true)
+    if (taskStatus === 'running') {
+      pollRef.current = setInterval(() => fetchLogs(true), 2000)
+    }
+    return () => { if (pollRef.current) clearInterval(pollRef.current) }
+  }, [taskName]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Start/stop poll when status changes while modal is open
+  useEffect(() => {
+    if (taskStatus === 'running') {
+      if (!pollRef.current) {
+        pollRef.current = setInterval(() => fetchLogs(true), 2000)
+      }
+    } else {
+      if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
+      fetchLogs(true) // one final fetch on completion
+    }
+  }, [taskStatus]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const isRunning = taskStatus === 'running'
+
+  return (
+    <Modal
+      title={`${taskLabel} — Logs`}
+      icon={<Terminal size={18}/>}
+      onClose={onClose}
+    >
+      <div style={{ display:'flex', flexDirection:'column', height:'70vh' }}>
+        {/* Sub-header */}
+        <div style={{
+          display:'flex', alignItems:'center', gap:10,
+          padding:'10px 20px', borderBottom:'1px solid var(--border)',
+          flexShrink:0, background:'var(--bg-hover)',
+        }}>
+          <StatusBadge status={taskStatus}/>
+          {isRunning && (
+            <span style={{ fontSize:11, color:'var(--text-muted)' }}>Auto-refreshing every 2s…</span>
+          )}
+          <span style={{ marginLeft:'auto', fontSize:11, color:'var(--text-muted)' }}>
+            {logs.length} line{logs.length !== 1 ? 's' : ''}
+          </span>
+          <button
+            onClick={() => fetchLogs(false)}
+            style={{ background:'none', border:'1px solid var(--border)', borderRadius:6, padding:'3px 10px', fontSize:11, color:'var(--text)', cursor:'pointer', display:'flex', alignItems:'center', gap:5 }}
+          >
+            <RefreshCw size={11}/> Refresh
+          </button>
+          <button
+            onClick={() => { setLogs([]); logBoxRef.current && (logBoxRef.current.scrollTop = 0) }}
+            style={{ background:'none', border:'1px solid var(--border)', borderRadius:6, padding:'3px 10px', fontSize:11, color:'var(--text-muted)', cursor:'pointer', display:'flex', alignItems:'center', gap:5 }}
+          >
+            <Trash2 size={11}/> Clear view
+          </button>
+        </div>
+        {/* Log body */}
+        <div
+          ref={logBoxRef}
+          style={{
+            flex:1, overflowY:'auto',
+            background:'#0d1117',
+            padding:'12px 16px',
+            fontFamily:'"Cascadia Code", "Fira Code", "JetBrains Mono", monospace',
+            fontSize:12, lineHeight:1.7,
+          }}
+        >
+          {logs.length === 0 ? (
+            <div style={{ color:'#484f58', paddingTop:32, textAlign:'center' }}>
+              No log entries yet. Trigger the task to see output here.
+            </div>
+          ) : (
+            logs.map((line, idx) => (
+              <div key={idx} style={{
+                color: line.level === 'error' ? '#f85149' : line.level === 'warn' ? '#e3b341' : '#e6edf3',
+                paddingLeft: line.level !== 'info' ? 0 : undefined,
+              }}>
+                <span style={{ color:'#484f58', marginRight:10, userSelect:'none', fontSize:11 }}>
+                  {line.ts ? new Date(line.ts).toLocaleTimeString('en-IN', { hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit' }) : ''}
+                </span>
+                {line.level !== 'info' && (
+                  <span style={{ marginRight:8, fontWeight:700, fontSize:11 }}>[{line.level.toUpperCase()}]</span>
+                )}
+                {line.msg}
+              </div>
+            ))
+          )}
+        </div>
+        {/* Scroll-to-bottom strip */}
+        <div style={{ padding:'8px 16px', borderTop:'1px solid var(--border)', flexShrink:0, display:'flex', justifyContent:'flex-end' }}>
+          <button
+            onClick={() => { if (logBoxRef.current) logBoxRef.current.scrollTop = logBoxRef.current.scrollHeight }}
+            style={{ background:'none', border:'none', fontSize:11, color:'var(--text-muted)', cursor:'pointer', display:'flex', alignItems:'center', gap:4 }}
+          >
+            ↓ Scroll to bottom
+          </button>
+        </div>
+      </div>
+    </Modal>
+  )
+}
+
 // ── Unified Pipeline Panel ────────────────────────────────────────────────────
 function PipelinePanel() {
-  const [entries,    setEntries]    = useState<TaskStatusEntry[]>([])
-  const [models,     setModels]     = useState<ModelInfo[]>([])
-  const [promoting,  setPromoting]  = useState<string | null>(null)
-  const [bfProgress, setBfProgress] = useState<BackfillProgress | null>(null)
-  const [bfLoading,  setBfLoading]  = useState(false)
-  const [bfPeriod,   setBfPeriod]   = useState<'1y'|'2y'|'5y'>('2y')
-  const [mlLoading,  setMlLoading]  = useState(false)
+  const [entries,      setEntries]      = useState<TaskStatusEntry[]>([])
+  const [models,       setModels]       = useState<ModelInfo[]>([])
+  const [promoting,    setPromoting]    = useState<string | null>(null)
+  const [mlLoading,    setMlLoading]    = useState(false)
   const [brokerPeriod, setBrokerPeriod] = useState<'1y'|'2y'|'5y'>('1y')
   const [nifty500Only, setNifty500Only] = useState(false)
-  const [dateVal,    setDateVal]    = useState('')
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const [dateVal,      setDateVal]      = useState('')
+  const [logModal,     setLogModal]     = useState<{ taskName: string; taskLabel: string } | null>(null)
 
   const statusMap = Object.fromEntries(entries.map(e => [e.task_name, e]))
 
@@ -132,8 +261,6 @@ function PipelinePanel() {
 
   useEffect(() => {
     refresh()
-    apiClient.get<BackfillProgress>('/admin/pipeline/backfill/progress')
-      .then(r => setBfProgress(r.data)).catch(() => {})
 
     // Auto-poll every 3s while any task is running
     const autoPoll = setInterval(async () => {
@@ -141,22 +268,8 @@ function PipelinePanel() {
       if (data && !data.some(e => e.status === 'running')) clearInterval(autoPoll)
     }, 3000)
 
-    return () => { clearInterval(autoPoll); if (pollRef.current) clearInterval(pollRef.current) }
+    return () => { clearInterval(autoPoll) }
   }, [])
-
-  const startLegacyBackfill = async () => {
-    setBfLoading(true)
-    try {
-      const { data } = await apiClient.post<TaskResult>('/admin/pipeline/backfill', { period: bfPeriod, force: false })
-      toast.success(data.message)
-      pollRef.current = setInterval(async () => {
-        const r = await apiClient.get<BackfillProgress>('/admin/pipeline/backfill/progress').catch(() => null)
-        if (r) { setBfProgress(r.data); if (r.data.status !== 'running') clearInterval(pollRef.current!) }
-      }, 2000)
-    } catch (e: unknown) {
-      toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? 'Failed.')
-    } finally { setBfLoading(false) }
-  }
 
   const trainModel = async () => {
     setMlLoading(true)
@@ -289,9 +402,6 @@ function PipelinePanel() {
     },
   ]
 
-  const isRunning = bfProgress?.status === 'running'
-  const bfPct     = bfProgress?.pct ?? 0
-
   return (
     <div className="settings-section">
       <div className="settings-title" style={{ display:'flex', alignItems:'center', gap:8, justifyContent:'space-between' }}>
@@ -337,24 +447,18 @@ function PipelinePanel() {
                 {entry?.message && entry.status !== 'idle' && (
                   <div style={{ fontSize:11, color:'var(--text-muted)', marginBottom:6, fontStyle:'italic' }}>{entry.message}</div>
                 )}
-                {/* Progress bar for long-running tasks with done/total in summary */}
-                {entry?.status === 'running' && typeof entry.summary?.total === 'number' && (entry.summary.total as number) > 0 && (() => {
-                  const done  = (entry.summary.done  as number) ?? 0
-                  const total = entry.summary.total  as number
-                  const pct   = Math.round((done / total) * 100)
-                  return (
-                    <div style={{ marginBottom:8 }}>
-                      <div style={{ background:'var(--bg-hover)', borderRadius:6, overflow:'hidden', height:5, marginBottom:3 }}>
-                        <div style={{ width:`${pct}%`, height:'100%', background:'var(--blue)', transition:'width 0.5s ease' }}/>
-                      </div>
-                      <div style={{ fontSize:10, color:'var(--text-muted)', display:'flex', justifyContent:'space-between' }}>
-                        <span>{done} / {total} symbols</span>
-                        <span>{pct}%{typeof entry.summary.rows === 'number' ? ` · ${(entry.summary.rows as number).toLocaleString()} rows` : ''}</span>
-                      </div>
-                    </div>
-                  )
-                })()}
                 {step.actions}
+                <button
+                  onClick={() => setLogModal({ taskName: step.task, taskLabel: step.label })}
+                  style={{
+                    marginTop:8, display:'inline-flex', alignItems:'center', gap:5,
+                    fontSize:11, color:'var(--text-muted)',
+                    background:'none', border:'1px solid var(--border)', borderRadius:6,
+                    padding:'3px 10px', cursor:'pointer',
+                  }}
+                >
+                  <Terminal size={11}/> View Logs
+                </button>
               </div>
               {entry?.ts && (
                 <div style={{ fontSize:10, color:'var(--text-muted)', whiteSpace:'nowrap', paddingTop:6 }}>
@@ -366,39 +470,15 @@ function PipelinePanel() {
         })}
       </div>
 
-      {/* Legacy yfinance backfill — hidden by default */}
-      <details style={{ marginTop:16, borderTop:'1px solid var(--border)', paddingTop:12 }}>
-        <summary style={{ fontSize:12, color:'var(--text-muted)', cursor:'pointer', userSelect:'none' }}>
-          Legacy Backfill (yfinance — may rate-limit)
-        </summary>
-        <div style={{ marginTop:10 }}>
-          <div style={{ fontSize:11, color:'var(--text-muted)', marginBottom:8 }}>
-            Prefer Broker Backfill (Step 2) over this. Yahoo Finance rate-limits large universes.
-          </div>
-          <div style={{ display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
-            <select value={bfPeriod} onChange={e => setBfPeriod(e.target.value as '1y'|'2y'|'5y')}
-              style={{ background:'var(--bg-hover)', border:'1px solid var(--border)', borderRadius:6, padding:'5px 8px', color:'var(--text)', fontSize:12 }}>
-              <option value="1y">1 Year</option>
-              <option value="2y">2 Years</option>
-              <option value="5y">5 Years</option>
-            </select>
-            <button className="btn btn-outline" onClick={startLegacyBackfill} disabled={bfLoading || isRunning}
-              style={{ display:'flex', alignItems:'center', gap:6, fontSize:12 }}>
-              <Play size={12}/> {isRunning ? 'Running…' : bfLoading ? 'Enqueueing…' : 'Run Backfill'}
-            </button>
-          </div>
-          {bfProgress && bfProgress.status !== 'idle' && (
-            <div style={{ marginTop:10 }}>
-              <div style={{ background:'var(--bg-hover)', borderRadius:6, overflow:'hidden', height:6, marginBottom:4 }}>
-                <div style={{ width:`${bfPct}%`, height:'100%', background: bfProgress.status === 'error' ? 'var(--red)' : 'var(--blue)', transition:'width 0.4s ease' }}/>
-              </div>
-              <div style={{ fontSize:11, color:'var(--text-muted)', display:'flex', justifyContent:'space-between' }}>
-                <span>{bfProgress.message}</span><span>{bfPct}%</span>
-              </div>
-            </div>
-          )}
-        </div>
-      </details>
+      {/* Task log modal */}
+      {logModal && (
+        <TaskLogModal
+          taskName={logModal.taskName}
+          taskLabel={logModal.taskLabel}
+          taskStatus={statusMap[logModal.taskName]?.status ?? 'idle'}
+          onClose={() => setLogModal(null)}
+        />
+      )}
     </div>
   )
 }
@@ -891,53 +971,88 @@ function StatusCard({ icon, label, status, detail, onClick }:
 }
 
 // ── Invite History ───────────────────────────────────────────────────────────
-function InviteHistory({ refreshKey }: { refreshKey: number }) {
-  const [invites, setInvites] = useState<InviteListItem[]>([])
+// ── User List ─────────────────────────────────────────────────────────────
+function UserList() {
+  const [users, setUsers] = useState<UserListItem[]>([])
   const [loading, setLoading] = useState(true)
+  const [deleting, setDeleting] = useState<string | null>(null)
 
-  useEffect(() => {
+  function load() {
     setLoading(true)
-    apiClient.get<InviteListItem[]>('/admin/users/invites')
-      .then(r => setInvites(r.data))
+    apiClient.get<UserListItem[]>('/admin/users')
+      .then(r => setUsers(r.data))
       .catch(() => {})
       .finally(() => setLoading(false))
-  }, [refreshKey])
+  }
 
-  const STATUS_COLOR: Record<string, string> = {
-    pending:  'var(--blue)',
-    used:     'var(--green)',
-    expired:  'var(--text-muted)',
-    revoked:  'var(--red)',
+  useEffect(() => { load() }, [])
+
+  async function handleDelete(u: UserListItem) {
+    if (!window.confirm(`Permanently delete ${u.email}? This cannot be undone.`)) return
+    setDeleting(u.id)
+    try {
+      await apiClient.delete(`/admin/users/${u.id}`)
+      toast.success(`${u.email} deleted.`)
+      load()
+    } catch (e: unknown) {
+      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? 'Failed to delete user.'
+      toast.error(msg)
+    } finally {
+      setDeleting(null)
+    }
+  }
+
+  const ROLE_COLOR: Record<string, string> = {
+    admin:  'var(--blue)',
+    trader: 'var(--text-secondary)',
   }
 
   return (
     <div className="settings-section">
-      <div className="settings-title" style={{ display:'flex', alignItems:'center', gap:8 }}>
-        <Users size={15}/> Invite History
+      <div className="settings-title" style={{ display:'flex', alignItems:'center', gap:8, justifyContent:'space-between' }}>
+        <span style={{ display:'flex', alignItems:'center', gap:8 }}><Users size={15}/> Registered Users</span>
+        <button className="btn btn-outline" style={{ fontSize:11, padding:'3px 10px' }} onClick={load}>
+          <RefreshCw size={12}/>
+        </button>
       </div>
       {loading ? (
         <div style={{ fontSize:12, color:'var(--text-muted)', padding:'12px 0' }}>Loading…</div>
-      ) : invites.length === 0 ? (
+      ) : users.length === 0 ? (
         <div className="empty-state" style={{ padding:'24px 0' }}>
-          <Users size={28}/>
-          <p style={{ fontSize:12 }}>No invites sent yet.</p>
+          <Users size={28}/><p style={{ fontSize:12 }}>No users yet.</p>
         </div>
       ) : (
         <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
-          {invites.map(inv => (
-            <div key={inv.id} style={{
-              display:'flex', alignItems:'center', gap:10, padding:'7px 10px',
+          {users.map(u => (
+            <div key={u.id} style={{
+              display:'flex', alignItems:'center', gap:10, padding:'8px 10px',
               background:'var(--bg-hover)', borderRadius:6, fontSize:12,
             }}>
               <div style={{ flex:1, minWidth:0 }}>
-                <div style={{ fontWeight:500, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{inv.email}</div>
-                <div style={{ fontSize:10, color:'var(--text-muted)', marginTop:1 }}>
-                  {new Date(inv.created_at).toLocaleString('en-IN', { dateStyle:'short', timeStyle:'short' })}
+                <div style={{ fontWeight:500, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                  {u.full_name ?? u.email}
                 </div>
+                <div style={{ fontSize:10, color:'var(--text-muted)', marginTop:1 }}>{u.email}</div>
               </div>
-              <span style={{ color: STATUS_COLOR[inv.status] ?? 'var(--text-muted)', fontWeight:600, fontSize:11, textTransform:'uppercase', flexShrink:0 }}>
-                {inv.status}
+              <span style={{ color: ROLE_COLOR[u.role] ?? 'var(--text-muted)', fontWeight:600, fontSize:11, textTransform:'uppercase', flexShrink:0 }}>
+                {u.role}
               </span>
+              <span style={{ color: u.is_active ? 'var(--green)' : 'var(--red)', fontSize:10, flexShrink:0 }}>
+                {u.is_active ? 'active' : 'inactive'}
+              </span>
+              <button
+                onClick={() => handleDelete(u)}
+                disabled={deleting === u.id}
+                title="Delete user"
+                style={{
+                  display:'flex', alignItems:'center', justifyContent:'center',
+                  width:26, height:26, borderRadius:5, border:'1px solid var(--red)',
+                  background:'transparent', color:'var(--red)', cursor:'pointer', flexShrink:0,
+                  opacity: deleting === u.id ? 0.5 : 1,
+                }}
+              >
+                {deleting === u.id ? <Loader size={12} style={{ animation:'spin 1s linear infinite' }}/> : <Trash2 size={12}/>}
+              </button>
             </div>
           ))}
         </div>
@@ -946,12 +1061,27 @@ function InviteHistory({ refreshKey }: { refreshKey: number }) {
   )
 }
 
-// ── Invite Form ───────────────────────────────────────────────────────────────
-function InviteForm({ onSent }: { onSent?: () => void }) {
+// ── Invite Panel (form + history in one card) ─────────────────────────────
+function InvitePanel() {
   const [email,   setEmail]   = useState('')
   const [loading, setLoading] = useState(false)
   const [result,  setResult]  = useState<InviteResult | null>(null)
   const [copied,  setCopied]  = useState(false)
+
+  const [invites, setInvites]   = useState<InviteListItem[]>([])
+  const [histLoading, setHistLoading] = useState(true)
+  const [revoking, setRevoking] = useState<string | null>(null)
+  const [limit, setLimit]       = useState<10 | 20 | 50>(10)
+
+  function loadInvites() {
+    setHistLoading(true)
+    apiClient.get<InviteListItem[]>('/admin/users/invites')
+      .then(r => setInvites(r.data))
+      .catch(() => {})
+      .finally(() => setHistLoading(false))
+  }
+
+  useEffect(() => { loadInvites() }, [])
 
   async function handleInvite(e: FormEvent) {
     e.preventDefault()
@@ -962,7 +1092,7 @@ function InviteForm({ onSent }: { onSent?: () => void }) {
       setResult(data)
       toast.success(`Invite sent for ${data.email}`)
       setEmail('')
-      onSent?.()
+      loadInvites()
     } catch (err: unknown) {
       const msg: string = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? 'Invite failed.'
       toast.error(msg)
@@ -975,30 +1105,244 @@ function InviteForm({ onSent }: { onSent?: () => void }) {
     setCopied(true); setTimeout(() => setCopied(false), 2000)
   }
 
+  async function handleRevoke(inv: InviteListItem) {
+    if (!window.confirm(`Revoke invite for ${inv.email}? They will no longer be able to register with this link.`)) return
+    setRevoking(inv.id)
+    try {
+      await apiClient.delete(`/admin/users/invites/${inv.id}`)
+      toast.success(`Invite for ${inv.email} revoked.`)
+      loadInvites()
+    } catch {
+      toast.error('Failed to revoke invite.')
+    } finally {
+      setRevoking(null)
+    }
+  }
+
+  const STATUS_COLOR: Record<string, string> = {
+    pending: 'var(--blue)',
+    used:    'var(--green)',
+    expired: 'var(--text-muted)',
+    revoked: 'var(--red)',
+  }
+
+  const visibleInvites = invites.slice(0, limit)
+
   return (
-    <div className="settings-section" style={{ height:'fit-content' }}>
-      <div className="settings-title" style={{ display:'flex', alignItems:'center', gap:8 }}>
-        <UserPlus size={16}/> Invite New User
-      </div>
-      <form onSubmit={handleInvite} style={{ display:'flex', flexDirection:'column', gap:14 }}>
-        <div className="form-group">
-          <label htmlFor="invite-email">Email Address</label>
-          <input id="invite-email" type="email" value={email} onChange={e => setEmail(e.target.value)}
-            placeholder="trader@example.com" required disabled={loading}/>
+    <div className="settings-section" style={{ display:'flex', gap:0, padding:0, overflow:'hidden' }}>
+      {/* ── Left: Invite form ── */}
+      <div style={{ flex:'0 0 280px', padding:'18px 20px', borderRight:'1px solid var(--border)' }}>
+        <div className="settings-title" style={{ display:'flex', alignItems:'center', gap:8, marginBottom:14 }}>
+          <UserPlus size={15}/> Invite New User
         </div>
-        <button type="submit" className="btn-primary" disabled={loading || !email.trim()}>
-          {loading ? 'Generating…' : 'Generate Invite Link'}
-        </button>
-      </form>
-      {result && (
-        <div className="invite-result">
-          <div className="text-sm" style={{ color:'var(--green)', fontWeight:600 }}>
-            ✓ Invite ready · expires {new Date(result.expires_at + 'Z').toLocaleString('en-IN', { dateStyle:'short', timeStyle:'short' })}
+        <form onSubmit={handleInvite} style={{ display:'flex', flexDirection:'column', gap:14 }}>
+          <div className="form-group">
+            <label htmlFor="invite-email">Email Address</label>
+            <input id="invite-email" type="email" value={email} onChange={e => setEmail(e.target.value)}
+              placeholder="trader@example.com" required disabled={loading}/>
           </div>
-          <div className="invite-url">{result.registration_url}</div>
-          <button className="copy-btn" onClick={handleCopy}>
-            {copied ? <><Check size={12}/> Copied!</> : <><Copy size={12}/> Copy Link</>}
+          <button type="submit" className="btn-primary" disabled={loading || !email.trim()}>
+            {loading ? 'Generating…' : 'Generate Invite Link'}
           </button>
+        </form>
+        {result && (
+          <div className="invite-result" style={{ marginTop:14 }}>
+            <div className="text-sm" style={{ color:'var(--green)', fontWeight:600 }}>
+              ✓ Invite ready · expires {new Date(result.expires_at).toLocaleString(undefined, { dateStyle:'short', timeStyle:'short' })}
+            </div>
+            <div className="invite-url">{result.registration_url}</div>
+            <button className="copy-btn" onClick={handleCopy}>
+              {copied ? <><Check size={12}/> Copied!</> : <><Copy size={12}/> Copy Link</>}
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* ── Right: Invite history ── */}
+      <div style={{ flex:1, minWidth:0, padding:'18px 20px', display:'flex', flexDirection:'column', gap:10 }}>
+        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:2 }}>
+          <div className="settings-title" style={{ display:'flex', alignItems:'center', gap:8, marginBottom:0 }}>
+            <Users size={15}/> Invite History
+          </div>
+          <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+            <span style={{ fontSize:11, color:'var(--text-muted)' }}>Show</span>
+            {([10, 20, 50] as const).map(n => (
+              <button
+                key={n}
+                onClick={() => setLimit(n)}
+                style={{
+                  fontSize:11, padding:'2px 8px', borderRadius:5, cursor:'pointer',
+                  border: limit === n ? '1px solid var(--blue)' : '1px solid var(--border)',
+                  background: limit === n ? 'var(--blue-dim, rgba(59,130,246,0.15))' : 'transparent',
+                  color: limit === n ? 'var(--blue)' : 'var(--text-muted)',
+                }}
+              >{n}</button>
+            ))}
+            <button className="btn btn-outline" style={{ fontSize:11, padding:'2px 8px' }} onClick={loadInvites}>
+              <RefreshCw size={11}/>
+            </button>
+          </div>
+        </div>
+
+        {histLoading ? (
+          <div style={{ fontSize:12, color:'var(--text-muted)', padding:'12px 0' }}>Loading…</div>
+        ) : invites.length === 0 ? (
+          <div className="empty-state" style={{ padding:'20px 0' }}>
+            <Users size={26}/><p style={{ fontSize:12 }}>No invites sent yet.</p>
+          </div>
+        ) : (
+          <div style={{ display:'flex', flexDirection:'column', gap:5 }}>
+            {visibleInvites.map(inv => (
+              <div key={inv.id} style={{
+                display:'flex', alignItems:'center', gap:10, padding:'6px 10px',
+                background:'var(--bg-hover)', borderRadius:6, fontSize:12,
+              }}>
+                <div style={{ flex:1, minWidth:0 }}>
+                  <div style={{ fontWeight:500, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{inv.email}</div>
+                  <div style={{ fontSize:10, color:'var(--text-muted)', marginTop:1 }}>
+                    {new Date(inv.created_at).toLocaleString('en-IN', { dateStyle:'short', timeStyle:'short' })}
+                  </div>
+                </div>
+                <span style={{ color: STATUS_COLOR[inv.status] ?? 'var(--text-muted)', fontWeight:600, fontSize:10, textTransform:'uppercase', flexShrink:0 }}>
+                  {inv.status}
+                </span>
+                {inv.status === 'pending' && (
+                  <button
+                    onClick={() => handleRevoke(inv)}
+                    disabled={revoking === inv.id}
+                    style={{
+                      fontSize:11, padding:'2px 8px', borderRadius:5, border:'1px solid var(--red)',
+                      background:'transparent', color:'var(--red)', cursor:'pointer', flexShrink:0,
+                      opacity: revoking === inv.id ? 0.5 : 1,
+                    }}
+                  >
+                    {revoking === inv.id ? '…' : 'Revoke'}
+                  </button>
+                )}
+              </div>
+            ))}
+            {invites.length > limit && (
+              <div style={{ fontSize:11, color:'var(--text-muted)', textAlign:'center', paddingTop:4 }}>
+                +{invites.length - limit} more — increase limit to see all
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── Deep Learning Models Panel ────────────────────────────────────────────────
+interface DLModelInfo {
+  id: string
+  model_type: string
+  version: string
+  is_active: boolean
+  metrics: Record<string, number>
+  hyperparams: Record<string, unknown>
+  trained_at: string
+}
+
+function DeepLearningModelsPanel() {
+  const [models,  setModels]  = useState<DLModelInfo[]>([])
+  const [loading, setLoading] = useState(true)
+  const [downloading, setDownloading] = useState(false)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const { data } = await apiClient.get<DLModelInfo[]>('/admin/models/deep-learning')
+      setModels(data)
+    } catch { /* silent */ }
+    finally { setLoading(false) }
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  const triggerDownload = async () => {
+    setDownloading(true)
+    try {
+      const { data } = await apiClient.post<{ message: string }>('/admin/models/download-from-drive', {})
+      toast.success(data.message)
+      setTimeout(load, 3000)
+    } catch (e: unknown) {
+      toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? 'Download failed.')
+    } finally { setDownloading(false) }
+  }
+
+  const MODEL_LABEL: Record<string, string> = {
+    lstm_ae:  'LSTM Autoencoder',
+    tft:      'TFT Forecaster',
+  }
+
+  const MODEL_DESC: Record<string, string> = {
+    lstm_ae:  'Anomaly detection via reconstruction error. Penalises signal score by 20% on anomaly.',
+    tft:      '5-day price forecaster. Results visible on the AI Forecast page.',
+  }
+
+  return (
+    <div className="settings-section">
+      <div className="settings-title" style={{ display:'flex', alignItems:'center', gap:8, justifyContent:'space-between' }}>
+        <span style={{ display:'flex', alignItems:'center', gap:8 }}><TrendingUp size={15}/> Deep Learning Models</span>
+        <div style={{ display:'flex', gap:8 }}>
+          <button className="btn btn-outline" onClick={load}
+            style={{ fontSize:11, padding:'3px 10px', display:'flex', alignItems:'center', gap:4 }}>
+            <RefreshCw size={11}/> Refresh
+          </button>
+          <button className="btn btn-outline" onClick={triggerDownload} disabled={downloading}
+            style={{ fontSize:11, padding:'3px 10px', display:'flex', alignItems:'center', gap:4 }}>
+            {downloading ? <Loader size={11}/> : <Play size={11}/>}
+            {downloading ? 'Downloading…' : 'Re-download from Drive'}
+          </button>
+        </div>
+      </div>
+
+      {loading ? (
+        <div style={{ color:'var(--text-muted)', fontSize:12, padding:'12px 0', display:'flex', alignItems:'center', gap:8 }}>
+          <Loader size={13}/> Loading…
+        </div>
+      ) : models.length === 0 ? (
+        <div style={{ color:'var(--text-muted)', fontSize:12, padding:'12px 0' }}>
+          No deep learning models registered yet. Run the Colab notebooks and use "Re-download from Drive".
+        </div>
+      ) : (
+        <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
+          {models.map(m => {
+            const label   = MODEL_LABEL[m.model_type] ?? m.model_type
+            const desc    = MODEL_DESC[m.model_type]  ?? ''
+            return (
+              <div key={m.id} style={{
+                background:'var(--bg-hover)', borderRadius:10,
+                border:`1px solid ${m.is_active ? 'var(--blue)' : 'var(--border)'}`,
+                padding:'14px 16px',
+              }}>
+                <div style={{ display:'flex', alignItems:'flex-start', gap:10, flexWrap:'wrap' }}>
+                  <div style={{ flex:1, minWidth:0 }}>
+                    <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:4, flexWrap:'wrap' }}>
+                      <span style={{ fontWeight:700, fontSize:13 }}>{label}</span>
+                      {m.is_active && (
+                        <span style={{ background:'var(--blue)', color:'#fff', borderRadius:10, padding:'1px 8px', fontSize:10, fontWeight:600 }}>ACTIVE</span>
+                      )}
+                      <span style={{ fontFamily:'monospace', fontSize:11, color:'var(--text-muted)' }}>{m.version}</span>
+                    </div>
+                    {desc && <div style={{ fontSize:11, color:'var(--text-muted)', marginBottom:8 }}>{desc}</div>}
+                    <div style={{ display:'flex', gap:10, flexWrap:'wrap' }}>
+                      {Object.entries(m.metrics ?? {}).map(([k, v]) => (
+                        <div key={k} style={{ background:'var(--bg)', border:'1px solid var(--border)', borderRadius:6, padding:'3px 9px', fontSize:11 }}>
+                          <span style={{ color:'var(--text-muted)', marginRight:4 }}>{k}:</span>
+                          <span style={{ fontFamily:'monospace', fontWeight:600 }}>{typeof v === 'number' ? v.toFixed(4) : String(v)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <div style={{ fontSize:10, color:'var(--text-muted)', whiteSpace:'nowrap', marginTop:2 }}>
+                    Trained {m.trained_at ? new Date(m.trained_at).toLocaleString('en-IN', { dateStyle:'short', timeStyle:'short' }) : '—'}
+                  </div>
+                </div>
+              </div>
+            )
+          })}
         </div>
       )}
     </div>
@@ -1011,7 +1355,6 @@ interface Health { db: HealthStatus; redis: HealthStatus }
 
 export default function AdminPage() {
   const [health, setHealth] = useState<Health>({ db:'pending', redis:'pending' })
-  const [inviteRefreshKey, setInviteRefreshKey] = useState(0)
   const [openBrowser, setOpenBrowser] = useState<'db'|'redis'|'ml'|null>(null)
 
   useEffect(() => {
@@ -1047,10 +1390,13 @@ export default function AdminPage() {
       {openBrowser === 'ml'   && <MLBrowserModal    onClose={() => setOpenBrowser(null)}/>}
 
       {/* User invite */}
-      <div className="admin-split">
-        <InviteForm onSent={() => setInviteRefreshKey(k => k + 1)} />
-        <InviteHistory refreshKey={inviteRefreshKey}/>
-      </div>
+      <InvitePanel/>
+
+      {/* Registered users */}
+      <UserList/>
+
+      {/* Deep learning models: LSTM + TFT */}
+      <DeepLearningModelsPanel/>
 
       {/* Unified pipeline: runbook + actions + status in one */}
       <PipelinePanel/>

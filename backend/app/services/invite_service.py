@@ -63,3 +63,21 @@ class InviteService:
             select(UserInvite).order_by(UserInvite.created_at.desc()).limit(limit)
         )
         return list(result.scalars().all())
+
+    async def revoke_invite(self, invite_id: uuid.UUID) -> UserInvite:
+        """Revoke a pending invite. Raises HTTPException if not found or not pending."""
+        result = await self._session.execute(
+            select(UserInvite).where(UserInvite.id == invite_id)
+        )
+        invite = result.scalar_one_or_none()
+        if invite is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Invite not found.")
+        if invite.status != "pending":
+            raise HTTPException(status.HTTP_409_CONFLICT, f"Invite is already '{invite.status}' and cannot be revoked.")
+        invite.status = "revoked"
+        invite.revoked_at = _utcnow()
+        self._session.add(invite)
+        await self._session.commit()
+        await self._session.refresh(invite)
+        logger.info("invite.revoked", invite_id=str(invite_id), email=invite.email)
+        return invite

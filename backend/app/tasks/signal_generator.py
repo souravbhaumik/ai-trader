@@ -31,8 +31,13 @@ from sqlalchemy import text
 
 from app.core.database import get_sync_session
 from app.tasks.celery_app import celery_app
+from app.tasks.task_utils import (
+    append_task_log, clear_task_logs, now_iso, write_task_status,
+)
 
 logger = structlog.get_logger(__name__)
+
+_TASK = "signal_generator"
 
 # ── Tunables ──────────────────────────────────────────────────────────────────
 _LOOKBACK       = 90    # calendar days fetched per symbol (Phase 3 needs more)
@@ -228,8 +233,13 @@ def generate_signals(self):
     from app.services.ml_loader import predict as ml_predict
     from app.services.feature_engineer import build_features, FEATURE_NAMES
 
+    started = now_iso()
+    clear_task_logs(_TASK)
+    write_task_status(_TASK, "running", "Signal generation started.", started_at=started)
+
     # ── Check if an active ML model is loaded ─────────────────────────────────
     ml_available = ml_predict(dict.fromkeys(FEATURE_NAMES, 0.0)) is not None
+    append_task_log(_TASK, f"ML model active: {ml_available}")
 
     # ── Prefetch all sentiment scores from Redis ──────────────────────────────
     sentiment_cache: Dict[str, float] = {}
@@ -264,6 +274,7 @@ def generate_signals(self):
         now_ts   = datetime.utcnow()
 
         logger.info("signal_generator.start", total_symbols=total, ml_mode=ml_available)
+        append_task_log(_TASK, f"Loaded {total} active symbols. Starting signal computation…")
 
         for idx in range(0, total, _BATCH_SIZE):
             batch = symbols[idx : idx + _BATCH_SIZE]
@@ -345,6 +356,26 @@ def generate_signals(self):
                         features["sentiment_score"] = round(sentiment, 4)
                         features["blend_score"]     = round(blended, 4)
 
+                # ── Phase 5: LSTM anomaly penalty ─────────────────────────────
+                # Build bar dicts needed by lstm_service (same rows already fetched)
+                try:
+                    from app.services.lstm_service import compute_anomaly_score  # noqa: PLC0415
+                    bar_dicts = [
+                        {"close": float(r[0]), "high": float(r[1]),
+                         "low": float(r[2]), "volume": float(r[3])}
+                        for r in rows_asc
+                    ]
+                    anomaly = compute_anomaly_score(sym, bar_dicts)
+                    if anomaly:
+                        features["anomaly_score"] = round(anomaly["score"], 4)
+                        if anomaly["score"] > 0.8:
+                            # Scale penalty: 0 at score=0.8, up to 40% at score≥1.8
+                            penalty    = min((anomaly["score"] - 0.8) / 1.0 * 0.40, 0.40)
+                            final_conf = max(final_conf * (1.0 - penalty), 0.0)
+                            features["anomaly_penalty"] = round(penalty, 4)
+                except Exception:  # noqa: BLE001
+                    pass  # Best-effort anomaly check — never block signal generation
+
                 if final_conf < _CONFIDENCE_MIN:
                     skipped += 1
                     continue
@@ -417,7 +448,22 @@ def generate_signals(self):
                     logger.warning("paper_trade.auto_failed", error=str(exc))
 
             session.commit()   # commits signals + paper trades for the batch
+            # Log progress every 5 batches
+            batch_num = idx // _BATCH_SIZE + 1
+            n_batches = (total + _BATCH_SIZE - 1) // _BATCH_SIZE
+            if batch_num % 5 == 0 or batch_num == n_batches:
+                write_task_status(
+                    _TASK, "running",
+                    f"Batch {batch_num}/{n_batches} — {inserted} signals so far…",
+                    started_at=started,
+                )
 
+        msg = f"Signal generation done — {inserted} signals, {skipped} skipped (low confidence / thin data)."
         logger.info("signal_generator.done", inserted=inserted, skipped=skipped,
                     ml_mode=ml_available)
+        write_task_status(
+            _TASK, "done", msg,
+            started_at=started, finished_at=now_iso(),
+            summary={"inserted": inserted, "skipped": skipped, "total_symbols": total, "ml_mode": ml_available},
+        )
         return {"status": "ok", "inserted": inserted, "skipped": skipped}

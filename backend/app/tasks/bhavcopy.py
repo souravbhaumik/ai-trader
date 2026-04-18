@@ -27,7 +27,7 @@ from sqlalchemy import text
 
 from app.core.database import get_sync_session
 from app.tasks.celery_app import celery_app
-from app.tasks.task_utils import now_iso, write_task_status
+from app.tasks.task_utils import clear_task_logs, now_iso, write_task_status
 
 logger = structlog.get_logger(__name__)
 
@@ -111,6 +111,7 @@ def ingest_bhavcopy(trade_date_str: str | None = None) -> dict:
     """
     trade_date = date.fromisoformat(trade_date_str) if trade_date_str else date.today()
     started    = now_iso()
+    clear_task_logs(_TASK_NAME)
 
     write_task_status(
         _TASK_NAME, "running",

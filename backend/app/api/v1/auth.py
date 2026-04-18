@@ -25,6 +25,8 @@ from app.core.security import (
 from app.models.user import User
 from app.schemas.auth import LoginRequest, MessageResponse, RegisterRequest, TokenResponse
 from app.services.auth_service import AuthService
+from app.core.security import hash_invite_token
+from app.models.user_invites import UserInvite
 
 logger = structlog.get_logger(__name__)
 
@@ -112,6 +114,35 @@ async def logout(
         await svc.logout(raw_refresh_token=raw)
     _clear_refresh_cookie(response)
     return MessageResponse(message="Logged out successfully.")
+
+
+class _InviteStatusResponse(BaseModel):
+    valid: bool
+    email: str | None = None
+    reason: str | None = None  # "revoked" | "expired" | "used" | "not_found"
+
+
+@router.get("/invite-check", response_model=_InviteStatusResponse)
+async def check_invite(
+    token: str,
+    session: AsyncSession = Depends(get_session),
+):
+    """Public endpoint — check if an invite token is still usable (no auth required)."""
+    from app.services.auth_service import _utcnow, _strip_tz  # local import to avoid circular
+    token_hash = hash_invite_token(token)
+    result = await session.execute(
+        select(UserInvite).where(UserInvite.token_hash == token_hash)
+    )
+    invite = result.scalar_one_or_none()
+    if invite is None:
+        return _InviteStatusResponse(valid=False, reason="not_found")
+    if invite.status == "revoked":
+        return _InviteStatusResponse(valid=False, reason="revoked")
+    if invite.status == "used":
+        return _InviteStatusResponse(valid=False, reason="used")
+    if _strip_tz(invite.expires_at) < _utcnow():
+        return _InviteStatusResponse(valid=False, reason="expired")
+    return _InviteStatusResponse(valid=True, email=invite.email)
 
 
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
@@ -264,3 +295,36 @@ async def totp_disable(
     await session.commit()
 
     return MessageResponse(message="TOTP disabled.")
+
+
+class _DeleteAccountRequest(BaseModel):
+    password: str  # user must confirm with their password
+
+
+@router.delete("/me", response_model=MessageResponse)
+async def delete_own_account(
+    body: _DeleteAccountRequest,
+    request: Request,
+    response: Response,
+    session: AsyncSession = Depends(get_session),
+):
+    """Permanently delete the caller's own account after password confirmation."""
+    from app.core.security import verify_password
+    user = await _current_user(request, session)
+    if not verify_password(body.password, user.hashed_password):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Incorrect password.")
+    if user.role == "admin":
+        # Count other admins — must have at least one remaining
+        result = await session.execute(
+            select(User).where(User.role == "admin", User.id != user.id, User.is_active == True)  # noqa: E712
+        )
+        if not result.scalar_one_or_none():
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "You are the only admin. Promote another user to admin before deleting your account."
+            )
+    await session.delete(user)
+    await session.commit()
+    _clear_refresh_cookie(response)
+    return MessageResponse(message="Account deleted.")
+

@@ -61,7 +61,7 @@ def notify_signal_sync(
     req  = urllib.request.Request(
         url,
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "User-Agent": "ai-trader/1.0"},
         method="POST",
     )
     try:
@@ -95,3 +95,56 @@ async def notify_signal_async(
             sl=sl,
         ),
     )
+
+
+def notify_trade_fill_sync(
+    *,
+    symbol: str,
+    direction: str,       # "BUY" | "SELL"
+    qty: int,
+    order_type: str,
+    broker_order_id: str,
+    status: str,
+    price: float = 0.0,
+) -> None:
+    """Send a Discord embed when a live order is placed / filled."""
+    url = _webhook_url()
+    if not url:
+        return
+
+    color = _COLOR.get(direction.upper(), 0x95A5A6)
+    emoji = "🟢" if direction.upper() == "BUY" else "🔴"
+    price_str = f"₹{price:,.2f}" if price else "MARKET"
+
+    payload = {
+        "embeds": [
+            {
+                "title": f"{emoji} LIVE ORDER · {direction.upper()} {symbol}",
+                "color": color,
+                "fields": [
+                    {"name": "Symbol",      "value": symbol,             "inline": True},
+                    {"name": "Direction",   "value": direction.upper(),  "inline": True},
+                    {"name": "Qty",         "value": str(qty),           "inline": True},
+                    {"name": "Order Type",  "value": order_type.upper(), "inline": True},
+                    {"name": "Price",       "value": price_str,          "inline": True},
+                    {"name": "Status",      "value": status,             "inline": True},
+                    {"name": "Order ID",    "value": broker_order_id or "—", "inline": False},
+                ],
+                "footer": {"text": "AI Trader · Live Execution"},
+            }
+        ]
+    }
+
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json", "User-Agent": "ai-trader/1.0"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310
+            if resp.status not in (200, 204):
+                logger.warning("Discord trade webhook returned %s", resp.status)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Discord trade webhook failed: %s", exc)

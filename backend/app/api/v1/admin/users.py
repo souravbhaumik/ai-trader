@@ -1,20 +1,40 @@
-"""Admin-only user management: invite endpoint."""
+"""Admin-only user management: invite + user CRUD endpoints."""
 from __future__ import annotations
 
 import uuid
-from typing import Annotated
+import threading
+from datetime import datetime
+from typing import Optional
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from jose import JWTError
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, delete as sa_delete
 
 from app.core.database import get_session
 from app.core.security import decode_access_token
 from app.models.user import User
-from app.schemas.invite import InviteRequest, InviteListItem, InviteResponse
+from app.schemas.invite import InviteRequest, InviteListItem, InviteResponse, InviteRevokeResponse
 from app.services.invite_service import InviteService
+
+
+class UserListItem(BaseModel):
+    id: uuid.UUID
+    email: str
+    full_name: Optional[str]
+    role: str
+    is_active: bool
+    is_totp_configured: bool
+    last_login_at: Optional[datetime]
+    created_at: datetime
+
+
+class UserDeleteResponse(BaseModel):
+    id: uuid.UUID
+    email: str
+    deleted: bool
 
 logger = structlog.get_logger(__name__)
 
@@ -59,6 +79,18 @@ async def invite_user(
     from app.core.config import settings
     registration_url = f"{settings.frontend_url}/register?token={raw_token}"
 
+    # Send invite email in a background thread — non-blocking, failure is logged not raised
+    from app.services.email_service import send_invite_email
+    threading.Thread(
+        target=send_invite_email,
+        kwargs={
+            "to_email": body.email,
+            "registration_url": registration_url,
+            "invited_by_name": admin.full_name or "Admin",
+        },
+        daemon=True,
+    ).start()
+
     return InviteResponse(
         id=invite.id,
         email=invite.email,
@@ -90,3 +122,63 @@ async def list_invites(
         )
         for inv in invites
     ]
+
+
+@router.delete("/users/invites/{invite_id}", response_model=InviteRevokeResponse)
+async def revoke_invite(
+    invite_id: uuid.UUID,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    """Revoke a pending invite (admin only). Cannot revoke used/expired invites."""
+    await _require_admin(request, session)
+    svc = InviteService(session)
+    invite = await svc.revoke_invite(invite_id)
+    return InviteRevokeResponse(id=invite.id, email=invite.email, status=invite.status, revoked_at=invite.revoked_at)
+
+
+@router.get("/users", response_model=list[UserListItem])
+async def list_users(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    """Return all registered users (admin only)."""
+    await _require_admin(request, session)
+    result = await session.execute(select(User).order_by(User.created_at.desc()))
+    users = result.scalars().all()
+    return [
+        UserListItem(
+            id=u.id,
+            email=u.email,
+            full_name=u.full_name,
+            role=u.role,
+            is_active=u.is_active,
+            is_totp_configured=u.is_totp_configured,
+            last_login_at=u.last_login_at,
+            created_at=u.created_at,
+        )
+        for u in users
+    ]
+
+
+@router.delete("/users/{user_id}", response_model=UserDeleteResponse)
+async def delete_user(
+    user_id: uuid.UUID,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    """Permanently delete a user account (admin only). Admins cannot delete themselves."""
+    admin = await _require_admin(request, session)
+    if admin.id == user_id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "You cannot delete your own account from here. Use account settings instead.")
+
+    result = await session.execute(select(User).where(User.id == user_id))
+    target = result.scalar_one_or_none()
+    if target is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found.")
+
+    email = target.email
+    await session.delete(target)
+    await session.commit()
+    logger.info("admin.user_deleted", deleted_user=str(user_id), deleted_email=email, by_admin=str(admin.id))
+    return UserDeleteResponse(id=user_id, email=email, deleted=True)

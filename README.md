@@ -174,6 +174,8 @@ backend/               FastAPI backend
   alembic/             Database migrations
   scripts/             Admin utilities
 db_init/               TimescaleDB Docker init SQL
+  01_init_timescaledb.sql   Hypertables, indexes, triggers
+  02_pipeline_task_status.sql  Pipeline task status table + seed rows
 frontend/              Vite + React + TypeScript
 docker-compose.yml     Services: postgres, redis, backend, frontend
 .env.example           Environment variable template
@@ -198,6 +200,14 @@ docker-compose.yml     Services: postgres, redis, backend, frontend
 - [x] WebSocket price streaming with Redis fan-out
 - [x] Signal generation pipeline
 - [x] Celery workers + Redis task queue
+
+## Phase 3 Features (Complete)
+
+- [x] DB-backed pipeline task status (`pipeline_task_status` PostgreSQL table — durable across worker restarts)
+- [x] Admin pipeline panel with per-task live log viewer (TaskLogModal, auto-polling)
+- [x] Startup reset: tasks interrupted by a worker crash are shown as `unknown` on next backend start
+- [x] DB browser with live row counts for all tables
+- [x] `GET /admin/pipeline/{task_name}/logs` API endpoint (reads ephemeral per-task log lines from Redis)
 - [x] TanStack Query on the frontend (stale-while-revalidate)
 - [x] Alembic migration init container (db-migrate)
 - [x] Circuit-breaker pattern on broker API calls

@@ -30,3 +30,10 @@ class InviteListItem(BaseModel):
     used_at: Optional[datetime]
     revoked_at: Optional[datetime]
     created_at: datetime
+
+
+class InviteRevokeResponse(BaseModel):
+    id: uuid.UUID
+    email: str
+    status: str
+    revoked_at: Optional[datetime]

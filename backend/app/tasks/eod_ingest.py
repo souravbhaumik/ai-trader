@@ -13,9 +13,13 @@ from sqlalchemy import text
 
 from app.core.database import get_sync_session
 from app.tasks.celery_app import celery_app
+from app.tasks.task_utils import (
+    append_task_log, clear_task_logs, now_iso, write_task_status,
+)
 
 logger = structlog.get_logger(__name__)
 
+_TASK = "eod_ingest"
 _BATCH_SIZE = 20
 _DELAY_SECS = 2.0
 
@@ -25,6 +29,10 @@ def ingest_eod():
     """Fetch the latest OHLCV day for all active symbols and upsert into ohlcv_daily."""
     import pandas as pd
     import yfinance as yf
+
+    started = now_iso()
+    clear_task_logs(_TASK)
+    write_task_status(_TASK, "running", "EOD ingest started.", started_at=started)
 
     with get_sync_session() as session:
         symbols = [
@@ -36,9 +44,13 @@ def ingest_eod():
             ).fetchall()
         ]
 
-        total_inserted = 0
+        append_task_log(_TASK, f"Loaded {len(symbols)} active symbols from DB.")
+        write_task_status(_TASK, "running", f"Fetching OHLCV for {len(symbols)} symbols…", started_at=started)
 
-        for i in range(0, len(symbols), _BATCH_SIZE):
+        total_inserted = 0
+        n_batches = (len(symbols) + _BATCH_SIZE - 1) // _BATCH_SIZE
+
+        for batch_idx, i in enumerate(range(0, len(symbols), _BATCH_SIZE)):
             batch = symbols[i: i + _BATCH_SIZE]
             try:
                 data = yf.download(
@@ -109,8 +121,21 @@ def ingest_eod():
 
             except Exception as exc:
                 logger.error("eod_batch_error", error=str(exc))
+                append_task_log(_TASK, f"Batch {batch_idx+1}/{n_batches} error: {exc}", level="error")
 
+            if (batch_idx + 1) % 5 == 0 or batch_idx == n_batches - 1:
+                write_task_status(
+                    _TASK, "running",
+                    f"Batch {batch_idx+1}/{n_batches} — {total_inserted} rows so far…",
+                    started_at=started,
+                )
             time.sleep(_DELAY_SECS)
 
+        msg = f"EOD ingest done — {total_inserted} rows upserted across {len(symbols)} symbols."
         logger.info("eod_ingest_done", inserted=total_inserted)
+        write_task_status(
+            _TASK, "done", msg,
+            started_at=started, finished_at=now_iso(),
+            summary={"inserted": total_inserted, "symbols": len(symbols)},
+        )
         return {"status": "done", "inserted": total_inserted}

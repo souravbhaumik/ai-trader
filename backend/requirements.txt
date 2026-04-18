@@ -61,3 +61,6 @@ rapidfuzz==3.9.3                # Fuzzy company-name → symbol matching
 lightgbm==4.3.0                 # Gradient boosting classifier for signal prediction
 scikit-learn==1.5.0             # train_test_split, metrics
 mlflow==2.14.1                  # Experiment tracking (optional; set MLFLOW_TRACKING_URI to enable)
+
+# ─── Deep Learning models (Phase 5) ───────────────────────────────────────────
+gdown==5.2.0                    # Download model artifacts from Google Drive

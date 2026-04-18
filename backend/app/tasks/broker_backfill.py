@@ -25,7 +25,7 @@ from sqlalchemy import text
 
 from app.core.database import get_sync_session
 from app.tasks.celery_app import celery_app
-from app.tasks.task_utils import now_iso, write_task_status
+from app.tasks.task_utils import clear_task_logs, now_iso, write_task_status
 
 logger = structlog.get_logger(__name__)
 
@@ -145,6 +145,7 @@ def run_broker_backfill(self, period: str = "1y") -> dict:
     for daily updates thereafter.
     """
     started = now_iso()
+    clear_task_logs(_TASK_NAME)
     from app.core.config import settings
 
     # ── 1. Validate credentials ───────────────────────────────────────────────

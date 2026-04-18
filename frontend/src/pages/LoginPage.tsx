@@ -1,5 +1,5 @@
 import { useState, FormEvent } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, Navigate } from 'react-router-dom'
 import toast from 'react-hot-toast'
 import { apiClient } from '../api/client'
 import { useAuthStore } from '../store/authStore'
@@ -20,6 +20,10 @@ interface LoginResponseData {
 export default function LoginPage() {
   const navigate = useNavigate()
   const setAuth = useAuthStore((s) => s.setAuth)
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
+
+  // Redirect already-authenticated users to home
+  if (isAuthenticated()) return <Navigate to="/" replace />
 
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')

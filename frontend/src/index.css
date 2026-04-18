@@ -682,7 +682,7 @@ select.input-base option { background: var(--bg-card); }
 .copy-btn:hover { background: var(--green-dim); }
 
 /* ── Settings Page ────────────────────────────────────────────────────────── */
-.settings-page { display: flex; flex-direction: column; gap: 24px; max-width: 700px; }
+.settings-page { display: flex; flex-direction: column; gap: 24px; width: 100%; }
 .settings-section { background: var(--bg-card); border: 1px solid var(--border); border-radius: 16px; padding: 24px; }
 .settings-title { font-size: 14px; font-weight: 600; color: var(--text-primary); margin-bottom: 18px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
 .settings-row { display: flex; align-items: center; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid var(--border); }

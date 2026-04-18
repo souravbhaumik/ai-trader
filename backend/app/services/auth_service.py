@@ -165,7 +165,7 @@ class AuthService:
                 status.HTTP_400_BAD_REQUEST,
                 f"Invite is {invite.status} and cannot be used.",
             )
-        if invite.expires_at < _utcnow():
+        if _strip_tz(invite.expires_at) < _utcnow():
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invite has expired.")
 
         # Check email not already registered

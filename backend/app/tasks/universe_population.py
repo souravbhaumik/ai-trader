@@ -22,7 +22,7 @@ from sqlalchemy import text
 
 from app.core.database import get_sync_session
 from app.tasks.celery_app import celery_app
-from app.tasks.task_utils import now_iso, write_task_status
+from app.tasks.task_utils import clear_task_logs, now_iso, write_task_status
 
 logger = structlog.get_logger(__name__)
 
@@ -132,6 +132,7 @@ def populate_universe(nifty500_only: bool = False) -> dict:
                        If False, insert the full NSE EQ universe (~2100 rows).
     """
     started = now_iso()
+    clear_task_logs(_TASK_NAME)
     write_task_status(
         _TASK_NAME, "running",
         "Downloading NSE equity master list…",

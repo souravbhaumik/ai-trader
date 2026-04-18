@@ -55,9 +55,13 @@ async def list_tables(
         SELECT
             t.table_name,
             pg_size_pretty(pg_total_relation_size(quote_ident(t.table_name))) AS size,
-            s.n_live_tup AS row_estimate
+            GREATEST(
+                COALESCE(s.n_live_tup, 0),
+                COALESCE(c.reltuples::bigint, 0)
+            ) AS row_estimate
         FROM information_schema.tables t
         LEFT JOIN pg_stat_user_tables s ON s.relname = t.table_name
+        LEFT JOIN pg_class c ON c.relname = t.table_name AND c.relkind = 'r'
         WHERE t.table_schema = 'public'
           AND t.table_type = 'BASE TABLE'
         ORDER BY t.table_name

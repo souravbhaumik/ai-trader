@@ -26,6 +26,7 @@ class SettingsOut(BaseModel):
     daily_loss_limit_pct: float
     notification_signals: bool
     notification_orders: bool
+    notification_news: bool
     preferred_broker: Optional[str]
 
 
@@ -36,6 +37,7 @@ class SettingsPatch(BaseModel):
     daily_loss_limit_pct: Optional[float] = None
     notification_signals: Optional[bool] = None
     notification_orders: Optional[bool] = None
+    notification_news: Optional[bool] = None
     preferred_broker: Optional[str] = None
 
 
@@ -51,6 +53,7 @@ async def get_settings(
         daily_loss_limit_pct=float(user_settings.daily_loss_limit_pct),
         notification_signals=user_settings.notification_signals,
         notification_orders=user_settings.notification_orders,
+        notification_news=user_settings.notification_news,
         preferred_broker=user_settings.preferred_broker,
     )
 
@@ -78,6 +81,8 @@ async def update_settings(
         user_settings.notification_signals = body.notification_signals
     if body.notification_orders is not None:
         user_settings.notification_orders = body.notification_orders
+    if body.notification_news is not None:
+        user_settings.notification_news = body.notification_news
     if body.preferred_broker is not None:
         valid_brokers = {"yfinance", "angel_one", "upstox"}
         if body.preferred_broker not in valid_brokers:
@@ -100,5 +105,6 @@ async def update_settings(
         daily_loss_limit_pct=float(user_settings.daily_loss_limit_pct),
         notification_signals=user_settings.notification_signals,
         notification_orders=user_settings.notification_orders,
+        notification_news=user_settings.notification_news,
         preferred_broker=user_settings.preferred_broker,
     )

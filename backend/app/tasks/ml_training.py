@@ -19,9 +19,13 @@ from typing import Any
 import structlog
 
 from app.tasks.celery_app import celery_app
+from app.tasks.task_utils import (
+    append_task_log, clear_task_logs, now_iso, write_task_status,
+)
 
 logger = structlog.get_logger(__name__)
 
+_TASK                = "ml_training"
 _MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "")
 _MLFLOW_EXPERIMENT   = os.getenv("MLFLOW_EXPERIMENT", "ai-trader-lgbm")
 
@@ -31,16 +35,33 @@ def train_model(self, **kwargs) -> dict[str, Any]:
     """Train LightGBM, log to MLflow if configured, register in ml_models."""
     from app.services.lgbm_trainer import train_lgbm
 
+    started = now_iso()
+    clear_task_logs(_TASK)
+    write_task_status(_TASK, "running", "LightGBM training started…", started_at=started)
     logger.info("ml_training.start")
 
-    result = train_lgbm(**kwargs)
+    try:
+        result = train_lgbm(**kwargs)
+    except Exception as exc:
+        msg = f"Training failed: {exc}"
+        logger.error("ml_training.failed", error=str(exc))
+        write_task_status(_TASK, "error", msg, started_at=started, finished_at=now_iso())
+        raise
 
     # ── Optional MLflow logging ───────────────────────────────────────────────
     if _MLFLOW_TRACKING_URI:
+        append_task_log(_TASK, "Logging run to MLflow…")
         _log_to_mlflow(result)
 
+    metrics_str = ", ".join(f"{k}={v:.4f}" for k, v in result.get("metrics", {}).items())
+    msg = f"Training done — version={result.get('version')}. Metrics: {metrics_str}"
     logger.info("ml_training.done", **{k: v for k, v in result.items() if k != "metrics"},
                 **result.get("metrics", {}))
+    write_task_status(
+        _TASK, "done", msg,
+        started_at=started, finished_at=now_iso(),
+        summary={"version": result.get("version"), "metrics": result.get("metrics", {})},
+    )
     return result
 
 

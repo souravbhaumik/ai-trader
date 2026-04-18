@@ -1,6 +1,7 @@
 ﻿import { useQuery } from '@tanstack/react-query'
 import { Wallet, Activity, Target, Clock, TrendingUp, TrendingDown } from 'lucide-react'
 import { apiClient } from '../api/client'
+import { useAuthStore } from '../store/authStore'
 
 interface IndexQuote {
   symbol: string; price: number; change: number; change_pct: number; name?: string
@@ -9,15 +10,24 @@ interface Signal {
   id: string; symbol: string; signal_type: string; confidence: number
   entry_price: number | null; target_price: number | null; ts: string
 }
+interface PortfolioSummary {
+  cash_balance: number
+  open_positions: number
+  open_value: number
+  realized_pnl: number
+  total_trades: number
+  closed_trades: number
+  win_rate: number | null
+}
 
-function StatCard({ icon, label, value, sub }: { icon: React.ReactNode; label: string; value: string; sub: string }) {
+function StatCard({ icon, label, value, sub, valueColor }: { icon: React.ReactNode; label: string; value: string; sub: string; valueColor?: 'green' | 'red' }) {
   return (
     <div className="stat-card">
       <div className="stat-card-inner">
         <div>
           <div className="stat-icon">{icon}</div>
           <div className="stat-label">{label}</div>
-          <div className="stat-value">{value}</div>
+          <div className="stat-value" style={valueColor ? { color: `var(--${valueColor})` } : undefined}>{value}</div>
           <div className="stat-sub text-muted">{sub}</div>
         </div>
       </div>
@@ -41,6 +51,7 @@ function IndexPill({ q }: { q: IndexQuote }) {
 }
 
 export default function DashboardPage() {
+  const tradingMode = useAuthStore(s => s.tradingMode)
   const { data: indicesData, isLoading: indicesLoading } = useQuery({
     queryKey: ['indices'],
     queryFn: () => apiClient.get('/prices/indices').then(r => r.data),
@@ -49,21 +60,52 @@ export default function DashboardPage() {
     queryKey: ['signals-recent'],
     queryFn: () => apiClient.get('/signals?per_page=5&active=true').then(r => r.data),
   })
+  const { data: portfolioData } = useQuery<PortfolioSummary>({
+    queryKey: ['portfolio-summary'],
+    queryFn: () => apiClient.get('/portfolio/paper/summary').then(r => r.data),
+    refetchInterval: 30_000,
+  })
 
   const indices: IndexQuote[] = (indicesData?.indices ?? []).map((q: IndexQuote & { name?: string }) => ({
     ...q, name: q.name ?? q.symbol,
   }))
   const signals: Signal[] = signalsData?.signals ?? []
   const loading = indicesLoading || signalsLoading
-  const activeCount = signals.filter(s => s.signal_type !== 'HOLD').length
+  const activeCount: number = signalsData?.total ?? signals.filter(s => s.signal_type !== 'HOLD').length
+
+  // Portfolio derived values
+  const portfolioValue = portfolioData
+    ? portfolioData.cash_balance + portfolioData.open_value
+    : null
+  const portfolioValueStr = portfolioValue !== null
+    ? '₹' + portfolioValue.toLocaleString('en-IN', { maximumFractionDigits: 0 })
+    : '…'
+  const portfolioSub = portfolioData
+    ? `${portfolioData.open_positions} open position${portfolioData.open_positions !== 1 ? 's' : ''} · ₹${portfolioData.cash_balance.toLocaleString('en-IN', { maximumFractionDigits: 0 })} cash`
+    : 'Loading…'
+
+  const pnlPositive = portfolioData ? portfolioData.realized_pnl >= 0 : null
+  const pnlStr = portfolioData
+    ? (portfolioData.realized_pnl >= 0 ? '+' : '') + '₹' + portfolioData.realized_pnl.toLocaleString('en-IN', { maximumFractionDigits: 0 })
+    : '…'
+  const pnlSub = portfolioData
+    ? portfolioData.closed_trades > 0 ? `From ${portfolioData.closed_trades} closed trade${portfolioData.closed_trades !== 1 ? 's' : ''}` : 'No closed trades yet'
+    : 'Loading…'
+
+  const winRateStr = portfolioData?.win_rate != null
+    ? portfolioData.win_rate.toFixed(1) + '%'
+    : '—'
+  const winRateSub = portfolioData
+    ? portfolioData.closed_trades > 0 ? `${portfolioData.closed_trades} closed trade${portfolioData.closed_trades !== 1 ? 's' : ''}` : 'No closed trades yet'
+    : 'Loading…'
 
   return (
     <div className="dashboard">
       {/* ── Stat row ─────────────────────────────────────────────────────── */}
       <div className="stat-grid">
-        <StatCard icon={<Wallet size={18}/>}   label="Portfolio Value" value="—"            sub="Connect broker to see balance" />
-        <StatCard icon={<Activity size={18}/>} label="Day P&L"         value="—"            sub="No live trades yet" />
-        <StatCard icon={<Target size={18}/>}   label="Win Rate"        value="—"            sub="No closed trades yet" />
+        <StatCard icon={<Wallet size={18}/>}   label={tradingMode === 'paper' ? 'Paper Portfolio' : 'Portfolio Value'} value={portfolioValueStr} sub={portfolioSub} />
+        <StatCard icon={pnlPositive === true ? <TrendingUp size={18}/> : pnlPositive === false ? <TrendingDown size={18}/> : <Activity size={18}/>} label="Net Profit" value={pnlStr} sub={pnlSub} valueColor={pnlPositive === true ? 'green' : pnlPositive === false ? 'red' : undefined} />
+        <StatCard icon={<Target size={18}/>}   label="Win Rate"        value={winRateStr}         sub={winRateSub} />
         <StatCard icon={<Clock size={18}/>}    label="Active Signals"  value={loading ? '…' : String(activeCount)} sub="From ML pipeline" />
       </div>
 

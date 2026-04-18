@@ -22,6 +22,14 @@ async def lifespan(app: FastAPI):
     logger.info("startup", environment=settings.environment)
     await init_redis()
 
+    # Any task still marked 'running' at startup was interrupted by a shutdown.
+    # Reset those rows to 'unknown' so the UI doesn't show stale RUNNING badges.
+    try:
+        from app.tasks.task_utils import reset_interrupted_tasks
+        reset_interrupted_tasks()
+    except Exception as exc:
+        logger.warning("startup.reset_interrupted_tasks_failed", error=str(exc))
+
     # Start the single shared price broadcaster for WebSocket fan-out
     from app.api.v1.ws import price_broadcaster
     broadcaster_task = asyncio.create_task(price_broadcaster())

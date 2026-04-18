@@ -62,7 +62,7 @@ export default function SignalLogPage() {
         ) : isEmpty ? (
           <div className="empty-state">
             <Activity size={36}/>
-            <p>No signals logged yet. History builds as the pipeline runs in Phase 3.</p>
+            <p>No signals logged yet. History builds as the pipeline runs.</p>
           </div>
         ) : (
           <>

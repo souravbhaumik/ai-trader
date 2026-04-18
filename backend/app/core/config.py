@@ -81,6 +81,13 @@ class Settings(BaseSettings):
     upstox_api_secret: str = ""
     upstox_redirect_uri: str = ""
 
+    # ── SMTP (optional — leave SMTP_HOST empty to disable email) ─────────────
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from: str = "AI Trader <noreply@example.com>"
+
     # ── CORS & URLs ───────────────────────────────────────────────────────────
     allowed_origins: str = "http://localhost:3000"
     frontend_url: str = "http://localhost:3000"

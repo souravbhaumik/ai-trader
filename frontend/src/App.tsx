@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { BrowserRouter, Routes, Route, NavLink, Navigate } from 'react-router-dom'
 import { Toaster } from 'react-hot-toast'
-import { Cpu, LayoutDashboard, Activity, Settings, Terminal, BarChart2, Zap, LogOut } from 'lucide-react'
+import { Cpu, LayoutDashboard, Activity, Settings, Terminal, BarChart2, Zap, LogOut, Briefcase, TrendingUp } from 'lucide-react'
 import { useAuthStore } from './store/authStore'
 import { apiClient } from './api/client'
 import LoginPage from './pages/LoginPage'
@@ -12,6 +12,8 @@ import SignalLogPage from './pages/SignalLogPage'
 import SettingsPage from './pages/SettingsPage'
 import AdminPage from './pages/AdminPage'
 import ScreenerPage from './pages/ScreenerPage'
+import LivePortfolioPage from './pages/LivePortfolioPage'
+import ForecastPage from './pages/ForecastPage'
 
 // ── Auth guard ────────────────────────────────────────────────────────────────
 function RequireAuth({ children }: { children: React.ReactNode }) {
@@ -22,9 +24,26 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
   return <>{children}</>
 }
 
+// ── Admin guard ───────────────────────────────────────────────────────────────
+function RequireAdmin({ children }: { children: React.ReactNode }) {
+  const isAdmin = useAuthStore((s) => s.isAdmin)
+  if (!isAdmin()) {
+    return <Navigate to="/" replace />
+  }
+  return <>{children}</>
+}
+
 // ── Protected app shell ───────────────────────────────────────────────────────
 function AppLayout() {
-  const { user, clearAuth } = useAuthStore()
+  const { user, clearAuth, tradingMode, setTradingMode, isAdmin } = useAuthStore()
+
+  // Hydrate tradingMode from API on every page load so topbar stays in sync.
+  useEffect(() => {
+    apiClient.get<{ trading_mode: string }>('/settings')
+      .then(r => setTradingMode(r.data.trading_mode as 'paper' | 'live'))
+      .catch(() => { /* leave cached value */ })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   async function handleLogout() {
     try {
@@ -44,7 +63,9 @@ function AppLayout() {
           AI Trader
         </div>
         <div className="topbar-right">
-          <span className="mode-badge paper">📄 Paper Trading</span>
+          <span className={`mode-badge ${tradingMode}`}>
+            {tradingMode === 'live' ? '⚡ Live Trading' : '📄 Paper Trading'}
+          </span>
           <div className="flex-center gap-2 text-sm text-muted">
             <span className="status-dot green" />
             Live
@@ -76,9 +97,18 @@ function AppLayout() {
         <NavLink to="/screener" className={({ isActive }) => `sidebar-nav-item ${isActive ? 'active' : ''}`}>
           <BarChart2 size={16} /> Market Screener
         </NavLink>
-        <NavLink to="/admin" className={({ isActive }) => `sidebar-nav-item ${isActive ? 'active' : ''}`}>
-          <Terminal size={16} /> Pipeline
+        <NavLink to="/live" className={({ isActive }) => `sidebar-nav-item ${isActive ? 'active' : ''}`}>
+          <Briefcase size={16} /> Live Portfolio
+          {tradingMode === 'live' && <span style={{ marginLeft: 'auto', width: 8, height: 8, borderRadius: '50%', background: 'var(--green)', display: 'inline-block' }} />}
         </NavLink>
+        <NavLink to="/forecast" className={({ isActive }) => `sidebar-nav-item ${isActive ? 'active' : ''}`}>
+          <TrendingUp size={16} /> AI Forecast
+        </NavLink>
+        {isAdmin() && (
+          <NavLink to="/admin" className={({ isActive }) => `sidebar-nav-item ${isActive ? 'active' : ''}`}>
+            <Terminal size={16} /> Pipeline
+          </NavLink>
+        )}
         <NavLink to="/settings" className={({ isActive }) => `sidebar-nav-item ${isActive ? 'active' : ''}`}>
           <Settings size={16} /> Settings
         </NavLink>
@@ -91,7 +121,9 @@ function AppLayout() {
           <Route path="/opportunities" element={<OpportunitiesPage />} />
           <Route path="/screener"      element={<ScreenerPage />} />
           <Route path="/signals"       element={<SignalLogPage />} />
-          <Route path="/admin"         element={<AdminPage />} />
+          <Route path="/live"          element={<LivePortfolioPage />} />
+          <Route path="/forecast"      element={<ForecastPage />} />
+          <Route path="/admin"         element={<RequireAdmin><AdminPage /></RequireAdmin>} />
           <Route path="/settings"      element={<SettingsPage />} />
         </Routes>
       </main>

@@ -534,6 +534,12 @@ class TaskStatusEntry(BaseModel):
     ts:          Optional[str] = None
 
 
+class TaskLogEntry(BaseModel):
+    ts:    str
+    level: str   # "info" | "error" | "warn"
+    msg:   str
+
+
 @router.get("/status", response_model=list[TaskStatusEntry])
 async def pipeline_status(
     request: Request,
@@ -546,4 +552,33 @@ async def pipeline_status(
 
     entries = read_all_task_statuses(_ALL_TASK_NAMES)
     return [TaskStatusEntry(**e) for e in entries]
+
+
+@router.get("/{task_name}/logs", response_model=list[TaskLogEntry])
+async def task_logs(
+    task_name: str,
+    request:   Request,
+    limit:     int = Query(default=200, ge=1, le=500),
+    session:   AsyncSession = Depends(get_session),
+):
+    """Return the last *limit* log lines for a pipeline task (admin only)."""
+    await _require_admin(request, session)
+
+    if task_name not in _ALL_TASK_NAMES:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            f"Unknown task '{task_name}'. Valid tasks: {_ALL_TASK_NAMES}",
+        )
+
+    from app.tasks.task_utils import read_task_logs
+
+    entries = read_task_logs(task_name, limit=limit)
+    return [
+        TaskLogEntry(
+            ts=e.get("ts", ""),
+            level=e.get("level", "info"),
+            msg=e.get("msg", ""),
+        )
+        for e in entries
+    ]
 

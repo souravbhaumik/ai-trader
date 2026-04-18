@@ -20,6 +20,7 @@ class UserSettings(SQLModel, table=True):
     daily_loss_limit_pct: Decimal = Field(default=Decimal("5.00"))
     notification_signals: bool = Field(default=True)
     notification_orders: bool = Field(default=True)
+    notification_news: bool = Field(default=True)
     preferred_broker: Optional[str] = Field(default=None, max_length=20)
 
     updated_at: datetime = Field(

@@ -20,6 +20,7 @@
    - 2.9 [model_runs](#29-model_runs)
    - 2.10 [ensemble_config](#210-ensemble_config)
    - 2.11 [expo_push_tokens](#211-expo_push_tokens)
+   - 2.12 [pipeline_task_status](#212-pipeline_task_status)
 3. [TimescaleDB Hypertables](#3-timescaledb-hypertables)
    - 3.1 [price_1min](#31-price_1min)
    - 3.2 [price_1day](#32-price_1day)
@@ -471,6 +472,45 @@ UPDATE expo_push_tokens
 
 **Relationships:**
 - `expo_push_tokens.user_id` → `users.id` (MANY-TO-ONE, CASCADE DELETE)
+
+---
+
+### 2.12 `pipeline_task_status`
+
+One row per Celery pipeline task. Upserted on every status transition — replaces the previous Redis-based status keys which were prone to stale `running` state after worker crashes.
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `task_name` | `VARCHAR(100)` | PK | Unique task identifier (e.g. `broker_backfill`, `eod_ingest`) |
+| `status` | `VARCHAR(20)` | NOT NULL DEFAULT `'idle'` | `idle` \| `running` \| `done` \| `error` \| `unknown` |
+| `message` | `TEXT` | NOT NULL DEFAULT `'Never run.'` | Latest human-readable status message |
+| `started_at` | `TIMESTAMPTZ` | | When the current/last run started |
+| `finished_at` | `TIMESTAMPTZ` | | When the current/last run finished |
+| `summary` | `JSONB` | NOT NULL DEFAULT `'{}'` | Task-specific metrics (rows inserted, symbols processed, etc.) |
+| `updated_at` | `TIMESTAMPTZ` | NOT NULL DEFAULT `NOW()` | Refreshed on every upsert — acts as a heartbeat for running tasks |
+
+**Status lifecycle:**
+```
+idle → running  (task starts)
+running → done  (task completes successfully)
+running → error (task raises an exception)
+running → unknown  (backend restarted while task was in-flight)
+```
+
+**Crash detection:** On every FastAPI backend startup, any row with `status = 'running'` is immediately updated to `status = 'unknown'` with the message *"Status unknown — application restarted while task was running."* This is the only persistent record of an interrupted run; no time-based heuristics are used.
+
+**Task log lines** (ephemeral): Per-task structured log lines are stored in Redis as `pipeline:logs:{task_name}` lists (capped at 500 entries, 7-day TTL). These are separate from this table — they are volatile and only needed for live log viewing in the Admin panel.
+
+```sql
+-- Seeded at table creation; safe to re-run
+INSERT INTO pipeline_task_status (task_name) VALUES
+    ('universe_population'), ('broker_backfill'), ('bhavcopy'),
+    ('backfill'), ('eod_ingest'), ('ml_training'),
+    ('signal_generator'), ('news_sentiment')
+ON CONFLICT (task_name) DO NOTHING;
+```
+
+**No relationships** — this table is standalone. It is created by `db_init/02_pipeline_task_status.sql` (not Alembic, since it is infrastructure-level, not application-level).
 
 ---
 

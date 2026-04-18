@@ -61,7 +61,7 @@ export default function OpportunitiesPage() {
         <div className="card card-glow">
           <div className="empty-state">
             <Zap size={40}/>
-            <p>No active signals yet. The ML pipeline generates opportunities in Phase 3.</p>
+            <p>No active signals yet. Run the ML pipeline to generate opportunities.</p>
           </div>
         </div>
       ) : (

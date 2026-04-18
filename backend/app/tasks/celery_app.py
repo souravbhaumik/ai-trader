@@ -70,4 +70,9 @@ celery_app.conf.beat_schedule = {
         "task":     "app.tasks.news_sentiment.fetch_news_sentiment",
         "schedule": crontab(hour="9-15", minute="*/15", day_of_week="1-5"),  # Mon–Fri 9:00 AM – 3:45 PM IST
     },
+    # LightGBM weekly retrain — Saturday 2:00 AM IST (off-market, low load)
+    "lgbm-weekly-retrain": {
+        "task":     "app.tasks.ml_training.train_model",
+        "schedule": crontab(hour=2, minute=0, day_of_week="6"),  # Saturday 2:00 AM IST
+    },
 }
