@@ -76,6 +76,9 @@ def _score_one(text: str, pipe) -> SentimentResult:
     returns a weighted-average result where each chunk's weight is proportional
     to its token count × its winning confidence.
     """
+    if not text or not text.strip():
+        return SentimentResult("neutral", 0.33, 0.33)
+
     tokenizer = pipe.tokenizer
     ids = tokenizer.encode(text, add_special_tokens=False)
 

@@ -337,7 +337,7 @@ def generate_signals(self):
 
                 # ── Phase 3: blend ML + sentiment ─────────────────────────────
                 if ml_available:
-                    sentiment = sentiment_cache.get(sym, 0.0)
+                    sentiment = max(-1.0, min(1.0, sentiment_cache.get(sym, 0.0)))
                     feat_vec  = build_features(sym, closes, highs, lows, volumes, sentiment)
                     ml_result = ml_predict(feat_vec)
 

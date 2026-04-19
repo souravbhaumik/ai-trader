@@ -126,7 +126,8 @@ def predict(features: dict[str, float]) -> Optional[dict]:
     import numpy as np
 
     feature_names = _state.feature_names
-    row = [features.get(n, 0.0) for n in feature_names]
+    import math as _math
+    row = [v if not _math.isnan(v := features.get(n, 0.0)) else 0.0 for n in feature_names]
     X   = np.array([row], dtype=np.float32)
 
     proba = float(_state.model.predict_proba(X)[0, 1])

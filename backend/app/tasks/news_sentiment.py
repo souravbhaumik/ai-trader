@@ -192,8 +192,8 @@ def fetch_news_sentiment(self):
                         row,
                     )
                     inserted += 1
-                except Exception:
-                    pass   # individual row error (e.g. FK / unique violation) — continue
+                except Exception as exc:
+                    logger.warning("news_task.insert_skipped", error=str(exc), row_id=row.get("id"))
             session.commit()
     except Exception as exc:
         logger.error("news_task.db_insert_failed", error=str(exc))
@@ -260,7 +260,11 @@ def _update_sentiment_cache(rows: list[dict], now_utc: datetime) -> None:
                 pub = row.get("published_at", now_utc)
                 if isinstance(pub, str):
                     pub = datetime.fromisoformat(pub)
-                age_hours = max((now_utc - pub.replace(tzinfo=timezone.utc)).total_seconds() / 3600, 0)
+                if pub.tzinfo is None:
+                    pub = pub.replace(tzinfo=timezone.utc)
+                else:
+                    pub = pub.astimezone(timezone.utc)
+                age_hours = max((now_utc - pub).total_seconds() / 3600, 0)
                 decay     = math.exp(-age_hours / 12)     # half-life ~12 hours
                 weight    = row["confidence"] * decay
                 # sentiment score: positive→1, neutral→0, negative→-1 mapping
