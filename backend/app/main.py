@@ -17,10 +17,48 @@ configure_logging()
 logger = structlog.get_logger(__name__)
 
 
+def _download_ml_models() -> None:
+    """Download LSTM and TFT model artifacts from Google Drive if not present.
+
+    Reads LSTM_GDRIVE_ID and TFT_GDRIVE_ID from settings.  No-ops silently
+    when the ID is empty or the file already exists (Docker volume persists
+    across restarts so we only pay the download cost once per fresh volume).
+    """
+    import gdown  # noqa: PLC0415 — optional dep; present in requirements.txt
+
+    downloads = [
+        (settings.lstm_gdrive_id, "/app/models/lstm/latest.pt", "lstm"),
+        (settings.tft_gdrive_id,  "/app/models/tft/latest.pt",  "tft"),
+    ]
+    for gdrive_id, dest_path, name in downloads:
+        if not gdrive_id:
+            logger.info(f"startup.model_skip.no_id", model=name)
+            continue
+        from pathlib import Path  # noqa: PLC0415
+        dest = Path(dest_path)
+        if dest.exists():
+            logger.info("startup.model_cached", model=name, path=dest_path)
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        url = f"https://drive.google.com/uc?id={gdrive_id}"
+        logger.info("startup.model_download_start", model=name, gdrive_id=gdrive_id)
+        try:
+            gdown.download(url, str(dest), quiet=False)
+            logger.info("startup.model_download_done", model=name, path=dest_path)
+        except Exception as exc:
+            logger.warning("startup.model_download_failed", model=name, error=str(exc))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("startup", environment=settings.environment)
     await init_redis()
+
+    # Download LSTM / TFT model artifacts from Google Drive (first boot only).
+    try:
+        _download_ml_models()
+    except Exception as exc:
+        logger.warning("startup.download_ml_models_failed", error=str(exc))
 
     # Any task still marked 'running' at startup was interrupted by a shutdown.
     # Reset those rows to 'unknown' so the UI doesn't show stale RUNNING badges.

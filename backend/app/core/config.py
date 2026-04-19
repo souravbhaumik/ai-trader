@@ -88,6 +88,10 @@ class Settings(BaseSettings):
     smtp_password: str = ""
     smtp_from: str = "AI Trader <noreply@example.com>"
 
+    # ── ML model artifacts (Google Drive File IDs — set after Colab training) ─
+    lstm_gdrive_id: str = ""    # LSTM_GDRIVE_ID from .env
+    tft_gdrive_id: str  = ""    # TFT_GDRIVE_ID  from .env
+
     # ── CORS & URLs ───────────────────────────────────────────────────────────
     allowed_origins: str = "http://localhost:3000"
     frontend_url: str = "http://localhost:3000"
