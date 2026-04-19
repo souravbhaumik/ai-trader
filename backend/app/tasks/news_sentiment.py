@@ -17,6 +17,7 @@ the API endpoint — no hot-path DB query needed.
 from __future__ import annotations
 
 import json
+import hashlib
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any
@@ -92,7 +93,61 @@ def fetch_news_sentiment(self):
         logger.info("news_task.no_mappings", raw_articles=len(all_articles))
         return {"status": "done", "inserted": 0}
 
-    # ── 4. Batch FinBERT scoring ──────────────────────────────────────────────
+    # ── 4. Deduplication BEFORE FinBERT inference ─────────────────────────────
+    # Compute a dedup key per article: prefer URL, fall back to MD5 of headline.
+    # Articles already in the DB (last 24 h) are skipped so we never re-score.
+    def _dedup_key(article: dict) -> str:
+        if article.get("url"):
+            return article["url"]
+        return "hl:" + hashlib.md5(article["title"].encode("utf-8", errors="replace")).hexdigest()
+
+    cutoff_pre = datetime.now(tz=timezone.utc) - timedelta(hours=24)
+    try:
+        with get_sync_session() as session:
+            existing_urls: set[str] = {
+                row[0] for row in session.execute(
+                    text(
+                        "SELECT url FROM news_sentiment"
+                        " WHERE published_at >= :cutoff AND url IS NOT NULL"
+                    ),
+                    {"cutoff": cutoff_pre},
+                ).fetchall()
+            }
+            existing_headlines: set[str] = {
+                "hl:" + hashlib.md5(row[0].encode("utf-8", errors="replace")).hexdigest()
+                for row in session.execute(
+                    text(
+                        "SELECT headline FROM news_sentiment"
+                        " WHERE published_at >= :cutoff"
+                    ),
+                    {"cutoff": cutoff_pre},
+                ).fetchall()
+            }
+        seen_keys = existing_urls | existing_headlines
+    except Exception as exc:
+        logger.warning("news_task.dedup_lookup_failed", error=str(exc))
+        seen_keys = set()
+
+    new_mapped: list[dict] = []
+    for article in mapped:
+        key = _dedup_key(article)
+        if key not in seen_keys:
+            new_mapped.append(article)
+            seen_keys.add(key)   # prevent duplicates within this batch too
+
+    logger.info(
+        "news_task.dedup",
+        total_mapped=len(mapped),
+        new_articles=len(new_mapped),
+        skipped=len(mapped) - len(new_mapped),
+    )
+    mapped = new_mapped
+
+    if not mapped:
+        logger.info("news_task.all_duplicates")
+        return {"status": "done", "inserted": 0}
+
+    # ── 5. Batch FinBERT scoring ──────────────────────────────────────────────
     # Score headline + summary together for richer context
     texts_to_score = [
         (r["title"] + ". " + r["summary"]).strip() if r.get("summary") else r["title"]
@@ -119,22 +174,11 @@ def fetch_news_sentiment(self):
             "created_at":  now_utc,
         })
 
-    # ── 5. Persist to DB ──────────────────────────────────────────────────────
+    # ── 6. Persist to DB ──────────────────────────────────────────────────────
     inserted = 0
     try:
         with get_sync_session() as session:
-            # Fetch URLs already stored in the last 24 h to avoid re-inserting
-            cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=24)
-            existing_urls: set[str] = {
-                row[0] for row in session.execute(
-                    text("SELECT url FROM news_sentiment WHERE published_at >= :cutoff AND url IS NOT NULL"),
-                    {"cutoff": cutoff},
-                ).fetchall()
-            }
-
             for row in rows:
-                if row.get("url") and row["url"] in existing_urls:
-                    continue   # already stored in this window
                 try:
                     session.execute(
                         text("""
@@ -147,16 +191,14 @@ def fetch_news_sentiment(self):
                         """),
                         row,
                     )
-                    if row.get("url"):
-                        existing_urls.add(row["url"])
                     inserted += 1
                 except Exception:
-                    pass   # individual row error — continue with rest
+                    pass   # individual row error (e.g. FK / unique violation) — continue
             session.commit()
     except Exception as exc:
         logger.error("news_task.db_insert_failed", error=str(exc))
 
-    # ── 6. Recompute rolling sentiment cache in Redis ─────────────────────────
+    # ── 7. Recompute rolling sentiment cache in Redis ─────────────────────────
     _update_sentiment_cache(rows, now_utc)
 
     logger.info("news_task.done", inserted=inserted, total_mapped=len(rows))

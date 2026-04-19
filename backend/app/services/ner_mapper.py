@@ -18,7 +18,147 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
-# ── Module-level universe cache ───────────────────────────────────────────────
+# ── Hardcoded alias map (checked BEFORE fuzzy matching) ──────────────────────
+# Keys are lowercase; multiple aliases can map to the same symbol.
+# Covers major Indian conglomerates where fuzzy matching is unreliable due to
+# shared brand names (e.g. "Reliance" → Industries, Power, Infrastructure).
+ALIAS_MAP: dict[str, str] = {
+    # Reliance group
+    "reliance industries": "RELIANCE",
+    "reliance": "RELIANCE",
+    "ril": "RELIANCE",
+    "jio": "RELIANCE",
+    "reliance jio": "RELIANCE",
+    "reliance retail": "RELIANCE",
+    "reliance power": "RPOWER",
+    "reliance infrastructure": "RELINFRA",
+    "reliance capital": "RELCAPITAL",
+    # Tata group
+    "tata consultancy": "TCS",
+    "tcs": "TCS",
+    "tata motors": "TATAMOTORS",
+    "tata steel": "TATASTEEL",
+    "tata power": "TATAPOWER",
+    "tata consumer": "TATACONSUM",
+    "tata chemicals": "TATACHEM",
+    "tata communications": "TATACOMM",
+    "tata elxsi": "TATAELXSI",
+    "titan": "TITAN",
+    "tanishq": "TITAN",
+    # HDFC group
+    "hdfc bank": "HDFCBANK",
+    "hdfc life": "HDFCLIFE",
+    "hdfc amc": "HDFCAMC",
+    "hdfc": "HDFCBANK",
+    # Bajaj group
+    "bajaj finance": "BAJFINANCE",
+    "bajaj finserv": "BAJAJFINSV",
+    "bajaj auto": "BAJAJ-AUTO",
+    "bajaj": "BAJAJ-AUTO",
+    # Adani group
+    "adani ports": "ADANIPORTS",
+    "adani enterprises": "ADANIENT",
+    "adani green": "ADANIGREEN",
+    "adani power": "ADANIPOWER",
+    "adani total gas": "ATGL",
+    "adani transmission": "ADANITRANS",
+    "adani wilmar": "AWL",
+    "adani": "ADANIENT",
+    # Banking / NBFCs
+    "state bank": "SBIN",
+    "state bank of india": "SBIN",
+    "sbi": "SBIN",
+    "icici bank": "ICICIBANK",
+    "icici prudential": "ICICIPRULI",
+    "icici lombard": "ICICIGI",
+    "kotak mahindra": "KOTAKBANK",
+    "kotak": "KOTAKBANK",
+    "axis bank": "AXISBANK",
+    "yes bank": "YESBANK",
+    "indusind": "INDUSINDBK",
+    "federal bank": "FEDERALBNK",
+    "bandhan bank": "BANDHANBNK",
+    # IT sector
+    "infosys": "INFY",
+    "wipro": "WIPRO",
+    "hcl tech": "HCLTECH",
+    "hcl technologies": "HCLTECH",
+    "tech mahindra": "TECHM",
+    "ltimindtree": "LTIM",
+    "l&t infotech": "LTIM",
+    "mphasis": "MPHASIS",
+    # Auto
+    "maruti suzuki": "MARUTI",
+    "maruti": "MARUTI",
+    "hero motocorp": "HEROMOTOCO",
+    "hero honda": "HEROMOTOCO",
+    "m&m": "M&M",
+    "mahindra": "M&M",
+    "eicher motors": "EICHERMOT",
+    "royal enfield": "EICHERMOT",
+    "tvs motor": "TVSMOTOR",
+    # FMCG / Consumer
+    "hindustan unilever": "HINDUNILVR",
+    "hul": "HINDUNILVR",
+    "itc": "ITC",
+    "nestle": "NESTLEIND",
+    "nestle india": "NESTLEIND",
+    "dabur": "DABUR",
+    "marico": "MARICO",
+    "godrej consumer": "GODREJCP",
+    "britannia": "BRITANNIA",
+    "emami": "EMAMILTD",
+    # Pharma
+    "sun pharma": "SUNPHARMA",
+    "sun pharmaceutical": "SUNPHARMA",
+    "dr reddy": "DRREDDY",
+    "dr. reddy": "DRREDDY",
+    "cipla": "CIPLA",
+    "divi's": "DIVISLAB",
+    "divis laboratories": "DIVISLAB",
+    "lupin": "LUPIN",
+    "aurobindo": "AUROPHARMA",
+    # Infra / Metals / Energy
+    "larsen & toubro": "LT",
+    "l&t": "LT",
+    "jsw steel": "JSWSTEEL",
+    "hindalco": "HINDALCO",
+    "vedanta": "VEDL",
+    "coal india": "COALINDIA",
+    "ntpc": "NTPC",
+    "power grid": "POWERGRID",
+    "gail": "GAIL",
+    "ongc": "ONGC",
+    "oil india": "OIL",
+    "ioc": "IOC",
+    "indian oil": "IOC",
+    "bpcl": "BPCL",
+    "bharat petroleum": "BPCL",
+    # Telecom
+    "bharti airtel": "BHARTIARTL",
+    "airtel": "BHARTIARTL",
+    "vodafone idea": "IDEA",
+    "vi": "IDEA",
+    # Consumer tech / new-age
+    "zomato": "ZOMATO",
+    "nykaa": "NYKAA",
+    "paytm": "PAYTM",
+    "policybazaar": "POLICYBZR",
+    "delhivery": "DELHIVERY",
+    # Paints / Speciality
+    "asian paints": "ASIANPAINT",
+    "pidilite": "PIDILITIND",
+    "berger paints": "BERGEPAINT",
+    # Others
+    "dlf": "DLF",
+    "godrej properties": "GODREJPROP",
+    "phoenix mills": "PHOENIXLTD",
+    "irctc": "IRCTC",
+    "hpcl": "HINDPETRO",
+}
+
+
+
 _UNIVERSE: dict[str, str] = {}   # {company_name_lower: symbol}
 _UNIVERSE_LOCK = threading.Lock()
 _UNIVERSE_LOADED_AT: float = 0.0
@@ -117,6 +257,12 @@ def map_headline_to_symbols(headline: str, query_hint: Optional[str] = None) -> 
     for candidate in candidates:
         if not candidate.strip():
             continue
+        # ── 1. Alias map (exact, case-insensitive) — highest priority ─────────
+        alias_hit = ALIAS_MAP.get(candidate.strip().lower())
+        if alias_hit:
+            symbols.add(alias_hit)
+            continue
+        # ── 2. Fuzzy match against DB universe ────────────────────────────────
         match = process.extractOne(
             candidate.lower(),
             universe_names,

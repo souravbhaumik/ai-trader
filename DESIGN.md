@@ -2499,6 +2499,39 @@ The `.env` file on VPS is `chmod 600` and owned by `deploy` only.
 
 ---
 
+### 17.x Localized Static Assets — The Logo Strategy
+
+**Current approach**: `scripts/download_logos.py` fetches stock logo `.png` binaries from a public CDN (Clearbit / Logo.dev) at setup time and writes them to `backend/app/static/logos/`. FastAPI serves them via `StaticFiles` mounted at `/static/logos/`.
+
+**Why this is the right call for now:**
+
+| Concern | Current approach |
+|---|---|
+| Latency | Zero — served directly from the local container filesystem |
+| Privacy | No third-party CDN ever sees which symbols your users are viewing |
+| Uptime | Logo availability is fully decoupled from external services |
+| Offline dev | Works without internet after initial download |
+
+**The Git bloat problem**: Hundreds of binary `.png` files committed to the repository will:
+- Inflate `git clone` time proportionally (every clone downloads the full binary history)
+- Grow the Docker build context and final image size
+- Make `git log --all` slower as history accumulates new logo updates
+
+**Current mitigation**: `backend/app/static/logos/` is added to `.gitignore` — logos are **not** committed to git. `download_logos.py` is re-run as part of the Docker image build (`RUN python /app/scripts/download_logos.py` in `Dockerfile`) so the logos are baked into the image layer, not the repository.
+
+**Production migration path (before scaling to thousands of users)**:
+
+1. Create an **AWS S3 bucket** (or DigitalOcean Spaces) named `aitrader-static`
+2. Upload the logos folder: `aws s3 sync backend/app/static/logos/ s3://aitrader-static/logos/ --acl public-read`
+3. Put **Cloudflare CDN** in front of the bucket (free tier, global edge caching, 0ms latency for repeat requests)
+4. Replace the `StaticFiles` mount with a single env var: `LOGO_BASE_URL=https://cdn.yourdomain.com/logos`
+5. Frontend reads `LOGO_BASE_URL` from the API config endpoint — no hardcoded paths in React components
+6. Remove the `RUN python /app/scripts/download_logos.py` line from `Dockerfile` — backend image is now purely code, ~200MB smaller
+
+This migration is a **one-afternoon task** and should be done before the first public deploy. Until then, the current local-binary approach is the correct tradeoff.
+
+---
+
 ## 18. Development Phases
 
 ### Phase 1 — Foundation

@@ -297,6 +297,22 @@ def generate_signals(self):
 
                 # Oldest → newest
                 rows_asc = list(reversed(rows))
+
+                # ── Lookahead guard ────────────────────────────────────────────
+                # Drop the most-recent bar if the market may still be open
+                # (i.e. a manual or backfill trigger during trading hours).
+                # At 4:45 PM IST (the scheduled run) this is a no-op because
+                # the 3:30 PM close candle is already final, but it protects
+                # against incomplete intraday candles in any other scenario.
+                import datetime as _dt
+                _now_ist = _dt.datetime.utcnow() + _dt.timedelta(hours=5, minutes=30)
+                _market_open = (
+                    _now_ist.weekday() < 5           # Mon–Fri
+                    and _dt.time(9, 15) <= _now_ist.time() <= _dt.time(15, 30)
+                )
+                if _market_open and len(rows_asc) > _MIN_BARS:
+                    rows_asc = rows_asc[:-1]   # discard today's incomplete candle
+
                 closes  = [float(r[0]) for r in rows_asc]
                 highs   = [float(r[1]) for r in rows_asc]
                 lows    = [float(r[2]) for r in rows_asc]
