@@ -842,62 +842,86 @@ FastAPI webhook endpoint
 
 **Webhook race condition — early-arrival postbacks:**
 
-Indian brokers (especially Angel One during high-liquidity sessions) execute market orders fast enough that the postback webhook can arrive at `POST /api/v1/webhooks/order-update` **before** the initiating REST request has finished committing the `PENDING` row to PostgreSQL. Naively querying `orders WHERE broker_order_id = ?` at this point finds nothing and silently drops the update — leaving the order permanently stuck on `PENDING`.
+Indian brokers (especially Angel One during high-liquidity sessions) execute market orders fast enough that the postback webhook can arrive at `POST /api/v1/webhooks/order-update` **before** the initiating REST request has finished committing the `PENDING` row to PostgreSQL. Naively querying `live_orders WHERE broker_order_id = ?` at this point finds nothing and silently drops the update — leaving the order permanently stuck on `PENDING`.
 
-Mitigation — short-TTL Redis stash + retry:
+Mitigation — Celery retry with countdown:
 
 ```python
-# fastapi_backend/app/api/webhooks.py (simplified)
+# backend/app/api/v1/webhooks.py (simplified)
 @router.post("/order-update")
-async def order_update_webhook(payload: OrderUpdatePayload):
-    verify_broker_hmac(payload)                              # always verify first
+async def order_update_webhook(request: Request):
+    payload = OrderUpdatePayload(**await request.json())
 
-    order = await db.get_order_by_broker_id(payload.broker_order_id)
-    if order is None:
-        # Row not committed yet — stash payload and retry in 3 seconds
-        key = f"webhook:pending:{payload.broker_order_id}"
-        await redis.set(key, payload.model_dump_json(), ex=30)
-        apply_webhook_update.apply_async(
-            args=[payload.broker_order_id],
-            countdown=3,                                     # wait for PENDING row to land
+    updated = await _update_order(payload)
+    if not updated:
+        # Row not committed yet — schedule a retry in 3 seconds
+        retry_order_update.apply_async(
+            args=[payload.orderid, payload.status, payload.filledshares, payload.averageprice],
+            countdown=3,
         )
-        return {"status": "queued"}
 
-    await order_service.apply_status_update(order, payload)
-    await ws_manager.broadcast_order_update(order.user_id, order)
-    return {"status": "ok"}
+    return {"received": True}   # always 200 — prevents broker from re-sending
 ```
 
 ```python
-# tasks/order_tasks.py
-@celery_app.task(bind=True, max_retries=5, default_retry_delay=2)
-def apply_webhook_update(self, broker_order_id: str):
-    key = f"webhook:pending:{broker_order_id}"
-    raw = redis_sync.get(key)
-    if raw is None:
-        return  # already processed by a concurrent webhook delivery or TTL expired
-
-    order = db_sync.get_order_by_broker_id(broker_order_id)
-    if order is None:
-        # Still not committed — retry (Celery exponential backoff)
-        raise self.retry(countdown=2 ** self.request.retries)
-
-    payload = OrderUpdatePayload.model_validate_json(raw)
-    order_service_sync.apply_status_update(order, payload)
-    ws_manager_sync.broadcast_order_update(order.user_id, order)
-    redis_sync.delete(key)  # clean up stash
+# backend/app/tasks/webhook_retry.py
+@celery_app.task(name="app.tasks.webhook_retry.retry_order_update",
+                 max_retries=3, default_retry_delay=3)
+def retry_order_update(broker_order_id, broker_status, filledshares, averageprice):
+    with get_sync_session() as session:
+        row = session.exec(
+            select(LiveOrder).where(LiveOrder.broker_order_id == broker_order_id)
+        ).first()
+        if row is None:
+            if self.request.retries < self.max_retries:
+                raise self.retry()
+            logger.warning("webhook.retry_exhausted", broker_order_id=broker_order_id)
+            return
+        # update row …
 ```
 
 Key properties of this design:
-- **HMAC verification always runs first** — early-arrival does not bypass security
-- **Idempotent**: if the broker sends a duplicate postback after the first succeeds, `redis.get(key)` returns `None` (already deleted) → silent no-op
-- **Bounded retries**: `max_retries=5` with exponential backoff covers up to ~60 s of commit delay; any genuine miss beyond that falls through to EOD reconciliation
-- **TTL guard**: the Redis key expires in 30 s regardless — ensures no stale payload accumulates if both attempts fail
+- **Always 200** — `{"received": True}` returned regardless; prevents broker from re-sending the postback
+- **Bounded retries**: `max_retries=3` × `default_retry_delay=3 s` covers up to 9 s of commit delay; genuine orphans after that are caught by EOD reconciliation
+- **No Redis dependency** — payload args are passed directly to the Celery task; no stash key to manage
+
+**Idempotency — network timeout recovery (`order_tag`):**
+
+If the backend call to the broker's `placeOrder` API raises `TimeoutError` / `ConnectionError` (network hiccup after the order was dispatched), a naive retry would create a duplicate order. The `ordertag` field (Angel One's 20-char idempotency tag) prevents this:
+
+```python
+# backend/app/services/live_trade_service.py (simplified)
+order_tag = str(order_id)[:20]           # internal UUID → idempotency key
+try:
+    result = await adapter.place_order(..., order_tag=order_tag)
+except (TimeoutError, ConnectionError, OSError):
+    # Check if broker actually received the order before retrying
+    result = await adapter.get_order_by_tag(order_tag)
+    if result is None:
+        # Order genuinely did not land — safe to mark TIMEOUT
+        await _mark_timeout(session, order_id)
+        raise RuntimeError("Order placement timed out and was not confirmed by broker")
+    # else: order did land — continue with result (no duplicate)
+```
+
+```python
+# backend/app/brokers/angel_one.py (simplified)
+async def get_order_by_tag(self, order_tag: str) -> Optional[OrderResult]:
+    """Scan getOrderBook for an order matching our client-side ordertag."""
+    book = await self._smart_api.getOrderBook()
+    for order in (book.get("data") or []):
+        if order.get("ordertag") == order_tag[:20]:
+            return OrderResult(broker_order_id=order["orderid"], ...)
+    return None
+```
+
+- `status = 'TIMEOUT'` is a valid value in the `live_orders.status` column (fits `VARCHAR(16)`)
+- On `TIMEOUT`, the frontend displays an actionable error; the user can verify in their broker app and re-submit if needed
 
 **Fallback — EOD reconciliation only (not real-time polling):**
 ```
 Celery Beat task @ 4:00 PM IST (after market close)
-  └── Fetch all orders with status PENDING/OPEN from DB
+  └── Fetch all live_orders with status PENDING/OPEN from DB
   └── Query broker REST API once for each open order
   └── Reconcile any status mismatches (missed webhooks)
   └── Log discrepancies with WARNING level

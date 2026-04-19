@@ -249,3 +249,14 @@ def is_available() -> bool:
     """Return True if an LSTM model is loaded and ready for inference."""
     _maybe_reload()
     return _state.model is not None
+
+
+def warm_up() -> bool:
+    """Eagerly load the LSTM model into memory.
+
+    Call this once at Celery worker startup so the first ``compute_anomaly_score``
+    call does not pay the cold-load penalty during a live signal generation run.
+    Returns True if the model loaded successfully, False if the artifact is absent.
+    """
+    with _lock:
+        return _load_model()

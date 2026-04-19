@@ -1171,28 +1171,37 @@ Record outcome of a manual restore drill.
 
 ### `POST /webhooks/order-update`
 
-**No Bearer auth** — validated via broker-specific HMAC header (see Section 1.7).
+**No Bearer auth** — this endpoint is called by the broker, not a user. No JWT required.
 
 **Headers**
 ```
-X-AngelOne-Signature: <hmac-sha256>
 Content-Type: application/json
 ```
 
-**Request** (Angel One postback shape)
+**Request** (Angel One postback field names — broker sends these exact keys)
 ```json
 {
-  "broker_order_id": "ANGL123456",
-  "status": "complete",
-  "filled_quantity": 10,
-  "average_price": "3720.50",
-  "timestamp": "2024-03-15T10:06:02Z"
+  "orderid":      "ANGL123456",
+  "status":       "complete",
+  "filledshares": "10",
+  "averageprice": "3720.50"
 }
 ```
 
-**Response** `200` — `{ "status": "ok" }` or `{ "status": "queued" }` (race condition mitigation)
+| Field | Type | Description |
+|-------|------|-------------|
+| `orderid` | `string` | Broker's order ID — matched against `live_orders.broker_order_id` |
+| `status` | `string` | Raw broker status (`open`, `complete`, `rejected`, `cancelled`) |
+| `filledshares` | `string \| null` | Shares filled so far; broker sends as string |
+| `averageprice` | `string \| null` | Average fill price; broker sends as string |
 
-**Response** `403` — HMAC verification failed; request discarded
+**Response** `200` — always returned, even on race-condition retry-queue
+```json
+{ "received": true }
+```
+> Always 200 to prevent the broker from retrying the postback.
+
+**Race-condition handling:** if `orderid` is not yet in `live_orders` (postback arrived before `placeOrder` INSERT committed), a Celery task is scheduled with `countdown=3 s` to retry the DB update up to 3 times. Genuine orphans (never committed) are reconciled at EOD.
 
 ---
 

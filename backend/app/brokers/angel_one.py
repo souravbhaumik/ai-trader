@@ -242,6 +242,7 @@ class AngelOneAdapter(BrokerAdapter):
         price: float = 0.0,
         stop_loss: float = 0.0,
         target: float = 0.0,
+        order_tag: str = "",   # unique client-generated tag for idempotency
     ) -> OrderResult:
         if not self._smart_api:
             raise RuntimeError("Angel One not connected — check credentials in Settings")
@@ -266,6 +267,11 @@ class AngelOneAdapter(BrokerAdapter):
             "stoploss": "0",
             "quantity": str(qty),
         }
+        # Include client-side order tag when provided — Angel One echoes this
+        # back in getOrderBook so we can identify the order if we never received
+        # the placeOrder response (network timeout idempotency check).
+        if order_tag:
+            params["ordertag"] = order_tag[:20]  # Angel One limit: 20 chars
 
         try:
             result = await self._run_sync(self._smart_api.placeOrder, params)
@@ -318,6 +324,26 @@ class AngelOneAdapter(BrokerAdapter):
                     return self._parse_order(order)
         except Exception as e:  # noqa: BLE001
             logger.error("angel_one_order_status_error", error=str(e))
+        return None
+
+    async def get_order_by_tag(self, order_tag: str) -> Optional[OrderResult]:
+        """Find an order in the order book by our client-side ``ordertag``.
+
+        Used for idempotency: if ``place_order`` times out before we receive a
+        response, we call this instead of retrying the POST — preventing double
+        orders.  Returns ``None`` if no matching order is found.
+        """
+        if not self._smart_api or not order_tag:
+            return None
+        try:
+            result = await self._run_sync(self._smart_api.getOrderBook)
+            if not (result and result.get("status")):
+                return None
+            for order in result.get("data", []) or []:
+                if str(order.get("ordertag", "")) == order_tag[:20]:
+                    return self._parse_order(order)
+        except Exception as e:  # noqa: BLE001
+            logger.error("angel_one_order_by_tag_error", error=str(e))
         return None
 
     async def get_positions(self) -> List[Position]:

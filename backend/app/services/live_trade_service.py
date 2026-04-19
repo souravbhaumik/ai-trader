@@ -94,8 +94,10 @@ async def place_live_order(
     """
     adapter = await _get_user_adapter(user_id, db)
 
-    # Pre-insert with PENDING status so we have a DB record even if API crashes
+    # Pre-insert with PENDING status so we have a DB record even if API crashes.
+    # order_id is also used as the idempotency ``order_tag`` sent to the broker.
     order_id = uuid.uuid4()
+    order_tag = str(order_id)[:20]   # Angel One ordertag limit: 20 chars
     now_ts = _now()
     await db.execute(
         text("""
@@ -121,15 +123,46 @@ async def place_live_order(
     )
     await db.commit()
 
-    # Place the order
-    result: OrderResult = await adapter.place_order(
-        symbol=symbol,
-        direction=direction,
-        qty=qty,
-        order_type=order_type,
-        product_type=product_type,
-        price=price,
-    )
+    # Place the order — pass order_tag for idempotency.
+    # On network timeout we query the order book by tag rather than retrying
+    # the POST (which would double-place the order).
+    result: Optional[OrderResult] = None
+    try:
+        result = await adapter.place_order(
+            symbol=symbol,
+            direction=direction,
+            qty=qty,
+            order_type=order_type,
+            product_type=product_type,
+            price=price,
+            order_tag=order_tag,
+        )
+    except (TimeoutError, ConnectionError, OSError) as exc:
+        # Network-level timeout: the order MAY have reached the broker.
+        # Query the order book by our tag to check before giving up.
+        logger.warning(
+            "live_trade.place_order_timeout_checking_order_book",
+            order_id=str(order_id), error=str(exc),
+        )
+        try:
+            result = await adapter.get_order_by_tag(order_tag)
+        except Exception as inner_exc:
+            logger.error(
+                "live_trade.order_book_query_failed",
+                order_id=str(order_id), error=str(inner_exc),
+            )
+
+        if result is None:
+            # Confirmed not placed — mark row as TIMEOUT and re-raise
+            await db.execute(
+                text("UPDATE live_orders SET status='TIMEOUT', updated_at=:now WHERE id=:id"),
+                {"now": _now(), "id": str(order_id)},
+            )
+            await db.commit()
+            raise RuntimeError(
+                "Network timeout placing order. The order was NOT placed. "
+                "Please check your positions before retrying."
+            ) from exc
 
     # Update DB with broker's order ID and status
     await db.execute(

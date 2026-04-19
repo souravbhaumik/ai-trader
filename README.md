@@ -247,13 +247,20 @@ docker-compose.yml     Services: postgres, redis, backend, frontend
 - [x] `POST /api/v1/portfolio/paper/orders` — manually place a paper trade
 - [x] `POST /api/v1/portfolio/paper/orders/{id}/close` — close position (auto-fetches live price via yfinance if not provided)
 
-## Coming in Phase 5 (Live Execution + Advanced ML)
+## Phase 6 Features — Live Execution + Advanced ML (Complete)
 
-- Live order execution via Angel One SmartAPI (requires broker account + `BROKER_NAME=angel_one`)
-- Live order execution via Upstox (requires Upstox account + OAuth redirect)
-- LSTM autoencoder for anomaly detection on OHLCV sequences (requires GPU recommended)
-- TFT (Temporal Fusion Transformer) multi-step price forecasting (requires GPU recommended)
-- Discord webhook alerts for paper/live order fills (extend `discord_service.py`)
+- [x] Angel One SmartAPI live order routing (`backend/app/brokers/angel_one.py`)
+- [x] Fernet-encrypted broker credentials stored per user (`broker_credentials` table)
+- [x] Idempotent order placement — broker `ordertag` (UUID) prevents double-orders on network timeout
+- [x] Timeout recovery: queries Angel One `getOrderBook` by tag before failing, marks row `TIMEOUT` if genuinely lost
+- [x] Broker order-status webhook `POST /api/v1/webhooks/order-update` (Angel One postback)
+- [x] Webhook race-condition safety — Celery retry (`countdown=3`) if postback arrives before INSERT commits
+- [x] LSTM autoencoder for OHLCV anomaly detection (`backend/app/services/lstm_service.py`)
+- [x] TFT (Temporal Fusion Transformer) multi-step price forecasting (`backend/app/services/tft_service.py`)
+- [x] Google Drive model download at startup (`LSTM_GDRIVE_ID`, `TFT_GDRIVE_ID` in `.env`)
+- [x] Celery `worker_ready` hook — eagerly loads LSTM + TFT models on worker boot (no cold-load spike)
+- [x] Discord webhook alerts for order fills (`DISCORD_WEBHOOK_URL` in `.env`)
+- [ ] Upstox live execution (deferred — OAuth redirect flow requires a public redirect URI)
 
 ## Coming in Phase 3 (AI/ML)
 

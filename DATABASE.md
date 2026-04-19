@@ -15,12 +15,13 @@
    - 2.4 [tickers](#24-tickers)
    - 2.5 [portfolio](#25-portfolio)
    - 2.6 [orders](#26-orders)
-   - 2.7 [trades](#27-trades)
-   - 2.8 [watchlist](#28-watchlist)
-   - 2.9 [model_runs](#29-model_runs)
-   - 2.10 [ensemble_config](#210-ensemble_config)
-   - 2.11 [expo_push_tokens](#211-expo_push_tokens)
-   - 2.12 [pipeline_task_status](#212-pipeline_task_status)
+   - 2.7 [live_orders](#27-live_orders)
+   - 2.8 [trades](#28-trades)
+   - 2.9 [watchlist](#29-watchlist)
+   - 2.10 [model_runs](#210-model_runs)
+   - 2.11 [ensemble_config](#211-ensemble_config)
+   - 2.12 [expo_push_tokens](#212-expo_push_tokens)
+   - 2.13 [pipeline_task_status](#213-pipeline_task_status)
 3. [TimescaleDB Hypertables](#3-timescaledb-hypertables)
    - 3.1 [price_1min](#31-price_1min)
    - 3.2 [price_1day](#32-price_1day)
@@ -319,7 +320,43 @@ Every order attempt, paper or live. Broker fills update this row via webhook pos
 
 ---
 
-### 2.7 `trades`
+### 2.7 `live_orders`
+
+Tracks every live (real-money) order placed via a broker adapter. Created by `live_trade_service.py` and updated by the Angel One postback webhook.
+
+> **Separate from `orders`** — `orders` is the unified paper+live design-doc table; `live_orders` is the table actually implemented in migration 0007 + 0008.
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | `UUID` | PK DEFAULT `gen_random_uuid()` | Internal order ID |
+| `user_id` | `UUID` | NOT NULL, FK → `users.id` ON DELETE CASCADE | |
+| `broker_order_id` | `VARCHAR(64)` | | Returned by broker on `placeOrder`; NULL until broker confirms |
+| `symbol` | `VARCHAR(32)` | NOT NULL | |
+| `exchange` | `VARCHAR(8)` | NOT NULL DEFAULT `'NSE'` | |
+| `direction` | `VARCHAR(4)` | NOT NULL | `BUY` \| `SELL` |
+| `qty` | `INTEGER` | NOT NULL | Requested quantity |
+| `order_type` | `VARCHAR(16)` | NOT NULL DEFAULT `'MARKET'` | |
+| `product_type` | `VARCHAR(16)` | NOT NULL DEFAULT `'DELIVERY'` | |
+| `price` | `NUMERIC(12,4)` | NOT NULL DEFAULT `0` | Limit price; `0` for MARKET |
+| `status` | `VARCHAR(16)` | NOT NULL DEFAULT `'PENDING'` | App-level status: `PENDING` \| `OPEN` \| `COMPLETE` \| `REJECTED` \| `CANCELLED` \| `TIMEOUT` |
+| `broker_status` | `VARCHAR(32)` | | Raw status string echoed from broker postback |
+| `filled_qty` | `INTEGER` | NOT NULL DEFAULT `0` | Shares filled so far (added in migration 0008) |
+| `avg_fill_price` | `NUMERIC(12,4)` | NOT NULL DEFAULT `0` | Average fill price (added in migration 0008) |
+| `signal_id` | `UUID` | | Signal that triggered this order (NULL for manual) |
+| `placed_at` | `TIMESTAMP` | NOT NULL DEFAULT `NOW()` | |
+| `updated_at` | `TIMESTAMP` | NOT NULL DEFAULT `NOW()` | |
+
+**Notes:**
+- `status = 'TIMEOUT'` is set when the broker call raises `TimeoutError` / `ConnectionError` and `getOrderBook` by `ordertag` confirms the order was never received by the broker.
+- `filled_qty` and `avg_fill_price` are populated by the postback webhook (`POST /api/v1/webhooks/order-update`) using Angel One's `filledshares` and `averageprice` fields.
+- Index: `ix_live_orders_user_id ON live_orders (user_id, placed_at DESC)`
+
+**Migrations:** `0007_live_trading.py` (base table), `0008_live_orders_fill_columns.py` (adds `filled_qty`, `avg_fill_price`)
+
+---
+
+### 2.8 `trades`
+
 
 Immutable record of every fill event. Never updated, only inserted.
 
@@ -357,7 +394,7 @@ Immutable record of every fill event. Never updated, only inserted.
 
 ---
 
-### 2.8 `watchlist`
+### 2.9 `watchlist`
 
 Per-user ticker watchlist with optional price alert threshold.
 
@@ -381,7 +418,7 @@ UNIQUE (user_id, symbol)
 
 ---
 
-### 2.9 `model_runs`
+### 2.10 `model_runs`
 
 Mirrors MLflow for fast admin UI access without hitting the MLflow server on every page load.
 
@@ -409,7 +446,7 @@ Mirrors MLflow for fast admin UI access without hitting the MLflow server on eve
 
 ---
 
-### 2.10 `ensemble_config`
+### 2.11 `ensemble_config`
 
 Single-row config table (enforced by `id = 1` PK). Weights are editable from the admin panel; changes take effect on next `generate_signals` run.
 
@@ -427,7 +464,7 @@ Single-row config table (enforced by `id = 1` PK). Weights are editable from the
 
 ---
 
-### 2.11 `expo_push_tokens`
+### 2.12 `expo_push_tokens`
 
 Device-scoped Expo Push Notification tokens. One user may have multiple active tokens (phone + tablet). Tokens rotate on app reinstall or OS token refresh — the `device_id` column is the dedup key.
 
@@ -475,7 +512,7 @@ UPDATE expo_push_tokens
 
 ---
 
-### 2.12 `pipeline_task_status`
+### 2.13 `pipeline_task_status`
 
 One row per Celery pipeline task. Upserted on every status transition — replaces the previous Redis-based status keys which were prone to stale `running` state after worker crashes.
 

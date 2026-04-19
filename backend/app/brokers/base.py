@@ -126,6 +126,7 @@ class BrokerAdapter(ABC):
         price: float = 0.0,
         stop_loss: float = 0.0,
         target: float = 0.0,
+        order_tag: str = "",   # unique client-generated ID for idempotency
     ) -> OrderResult:
         """Place a live order. Raises NotImplementedError if broker doesn't support it."""
         raise NotImplementedError(f"{self.broker_name} does not support order placement")

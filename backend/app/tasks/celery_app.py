@@ -26,6 +26,7 @@ celery_app = Celery(
         "app.tasks.news_sentiment",
         "app.tasks.signal_generator",
         "app.tasks.universe_population",
+        "app.tasks.webhook_retry",
     ],
 )
 
@@ -76,3 +77,33 @@ celery_app.conf.beat_schedule = {
         "schedule": crontab(hour=2, minute=0, day_of_week="6"),  # Saturday 2:00 AM IST
     },
 }
+
+
+# ── Worker startup hook — pre-load PyTorch models into memory ─────────────────
+# This fires once per worker process after the worker is fully initialised.
+# Loading here (rather than on first inference call) avoids a cold-load spike
+# during live signal generation and prevents Celery heartbeat timeouts on
+# CPU-only VPS machines where torch.load can take 5-15 seconds.
+
+from celery.signals import worker_ready  # noqa: E402
+
+
+@worker_ready.connect
+def _preload_ml_models(sender, **kwargs):  # noqa: ANN001, ANN002, ANN003
+    """Eagerly load LSTM and TFT model artifacts when the worker starts."""
+    import logging  # noqa: PLC0415
+    _log = logging.getLogger(__name__)
+
+    try:
+        from app.services.lstm_service import warm_up as lstm_warm_up  # noqa: PLC0415
+        ok = lstm_warm_up()
+        _log.info("celery_worker.lstm_preload", loaded=ok)
+    except Exception as exc:
+        _log.warning("celery_worker.lstm_preload_failed", error=str(exc))
+
+    try:
+        from app.services.tft_service import warm_up as tft_warm_up  # noqa: PLC0415
+        ok = tft_warm_up()
+        _log.info("celery_worker.tft_preload", loaded=ok)
+    except Exception as exc:
+        _log.warning("celery_worker.tft_preload_failed", error=str(exc))
