@@ -92,6 +92,9 @@ class Settings(BaseSettings):
     lstm_gdrive_id: str = ""    # LSTM_GDRIVE_ID from .env
     tft_gdrive_id: str  = ""    # TFT_GDRIVE_ID  from .env
 
+    # ── Logo.dev ───────────────────────────────────────────────────────────────
+    logo_dev_token: str = ""    # pk_...  (public token for img.logo.dev)
+
     # ── CORS & URLs ───────────────────────────────────────────────────────────
     allowed_origins: str = "http://localhost:3000"
     frontend_url: str = "http://localhost:3000"

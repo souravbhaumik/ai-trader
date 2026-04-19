@@ -27,6 +27,7 @@ celery_app = Celery(
         "app.tasks.signal_generator",
         "app.tasks.universe_population",
         "app.tasks.webhook_retry",
+        "app.tasks.eod_reconciliation",
     ],
 )
 
@@ -75,6 +76,11 @@ celery_app.conf.beat_schedule = {
     "lgbm-weekly-retrain": {
         "task":     "app.tasks.ml_training.train_model",
         "schedule": crontab(hour=2, minute=0, day_of_week="6"),  # Saturday 2:00 AM IST
+    },
+    # EOD live-order reconciliation — 4:00 PM IST Mon–Fri (before market close)
+    "eod-live-order-reconciliation": {
+        "task":     "app.tasks.eod_reconciliation.reconcile_live_orders",
+        "schedule": crontab(hour=16, minute=0, day_of_week="1-5"),
     },
 }
 

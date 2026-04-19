@@ -128,7 +128,7 @@ async def _update_order(
     # get_session is an async context manager that yields an AsyncSession
     async for db in get_session():
         result = await db.execute(
-            text("SELECT id FROM live_orders WHERE broker_order_id = :boid LIMIT 1"),
+            text("SELECT id, user_id FROM live_orders WHERE broker_order_id = :boid LIMIT 1"),
             {"boid": broker_order_id},
         )
         row = result.first()
@@ -160,6 +160,24 @@ async def _update_order(
             broker_order_id=broker_order_id,
             new_status=new_status,
         )
+
+        # Push real-time update to the user's active WS connections (best-effort)
+        user_id_str = str(row.user_id)
+        try:
+            from app.api.v1.ws import manager as ws_manager  # noqa: PLC0415
+            await ws_manager.send_to_user(user_id_str, {
+                "type": "order_update",
+                "data": {
+                    "broker_order_id": broker_order_id,
+                    "status":          new_status,
+                    "filled_qty":      filled_qty,
+                    "avg_fill_price":  avg_price,
+                },
+            })
+        except Exception as ws_exc:
+            logger.debug("webhook.ws_push_failed", error=str(ws_exc))
+
         return True
 
     return False  # noqa: unreachable — for type checker
+

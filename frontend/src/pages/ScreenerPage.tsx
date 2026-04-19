@@ -2,6 +2,9 @@
 import { useQuery } from '@tanstack/react-query'
 import { BarChart2, Search, ChevronUp, ChevronDown, ChevronsUpDown, ChevronLeft, ChevronRight } from 'lucide-react'
 import { apiClient } from '../api/client'
+import ForecastModal from '../components/ForecastModal'
+import OrderModal, { OrderDefaults } from '../components/OrderModal'
+import TickerLogo from '../components/TickerLogo'
 
 interface ScreenerRow {
   symbol: string; name: string; sector: string; market_cap: number | null
@@ -25,6 +28,8 @@ export default function ScreenerPage() {
   const [page, setPage]         = useState(1)
   const [sortBy, setSortBy]     = useState<SortKey>('market_cap')
   const [sortDir, setSortDir]   = useState<SortDir>('desc')
+  const [forecastSym, setForecastSym]     = useState<string | null>(null)
+  const [orderDefaults, setOrderDefaults] = useState<OrderDefaults | null>(null)
 
   const PER_PAGE = 50
 
@@ -123,12 +128,18 @@ export default function ScreenerPage() {
                     Mkt Cap <SortIcon field="market_cap" sortKey={sortBy} dir={sortDir}/>
                   </th>
                   <th>Index</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {result!.rows.map(r => (
                   <tr key={r.symbol}>
-                    <td className="text-mono" style={{ fontWeight:600 }}>{r.symbol.replace('.NS','')}</td>
+                    <td>
+                      <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                        <TickerLogo symbol={r.symbol} size={28} />
+                        <span className="text-mono" style={{ fontWeight:600 }}>{r.symbol.replace('.NS','')}</span>
+                      </div>
+                    </td>
                     <td className="text-sm">{r.name}</td>
                     <td><span className="sector-tag">{r.sector}</span></td>
                     <td className="text-mono text-sm">
@@ -142,6 +153,26 @@ export default function ScreenerPage() {
                     </td>
                     <td className="text-sm text-muted">
                       {r.in_nifty50 ? 'N50 · ' : ''}{r.in_nifty500 ? 'N500' : ''}
+                    </td>
+                    <td>
+                      <div style={{ display:'flex', gap:4 }}>
+                        <button
+                          className="btn"
+                          style={{ padding:'4px 10px', fontSize:11, fontWeight:700, background:'var(--green)', color:'#fff' }}
+                          onClick={() => setOrderDefaults({ symbol: r.symbol, direction:'BUY', entryPrice: r.price })}
+                        >BUY</button>
+                        <button
+                          className="btn"
+                          style={{ padding:'4px 10px', fontSize:11, fontWeight:700, background:'var(--red)', color:'#fff' }}
+                          onClick={() => setOrderDefaults({ symbol: r.symbol, direction:'SELL', entryPrice: r.price })}
+                        >SELL</button>
+                        <button
+                          className="btn-outline btn"
+                          style={{ padding:'4px 8px', fontSize:11 }}
+                          onClick={() => setForecastSym(r.symbol)}
+                          title="AI Forecast"
+                        >📈</button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -157,6 +188,8 @@ export default function ScreenerPage() {
           </>
         )}
       </div>
+      <ForecastModal symbol={forecastSym} onClose={() => setForecastSym(null)} />
+      <OrderModal defaults={orderDefaults} onClose={() => setOrderDefaults(null)} />
     </div>
   )
 }

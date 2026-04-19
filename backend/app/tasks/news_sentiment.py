@@ -37,7 +37,7 @@ _ROLLING_WINDOW_HOURS = 24
 @celery_app.task(name="app.tasks.news_sentiment.fetch_news_sentiment", bind=True)
 def fetch_news_sentiment(self):
     """Fetch, NER-map, score, persist, and cache news sentiment."""
-    from app.services.news_fetcher   import fetch_rss, fetch_google_news
+    from app.services.news_fetcher   import fetch_rss, fetch_google_news, fetch_yahoo_finance_news
     from app.services.ner_mapper     import map_headline_to_symbols, _ensure_universe
     from app.services.sentiment_scorer import score_headlines
 
@@ -49,22 +49,24 @@ def fetch_news_sentiment(self):
     # Pass the 50 most mentioned company names as Google News queries
     # (lightweight — we don't want to send 500 queries per run)
     gn_articles: list[dict] = []
+    yf_articles: list[dict] = []
     try:
         with get_sync_session() as session:
-            top_names = [
-                row[0] for row in session.execute(
-                    text(
-                        "SELECT name FROM stock_universe"
-                        " WHERE is_active = TRUE AND name IS NOT NULL"
-                        " ORDER BY market_cap DESC NULLS LAST LIMIT 50"
-                    )
-                ).fetchall()
-            ]
-        gn_articles = fetch_google_news(top_names, max_per_symbol=3)
+            rows = session.execute(
+                text(
+                    "SELECT symbol, name FROM stock_universe"
+                    " WHERE is_active = TRUE AND name IS NOT NULL"
+                    " ORDER BY market_cap DESC NULLS LAST LIMIT 50"
+                )
+            ).fetchall()
+        top_names   = [r[0] + ".NS" for r in rows]  # Yahoo needs .NS suffix
+        top_queries = [r[1] for r in rows]           # Google needs company name
+        gn_articles = fetch_google_news(top_queries, max_per_symbol=3)
+        yf_articles = fetch_yahoo_finance_news(top_names, max_per_ticker=5)
     except Exception as exc:
-        logger.warning("news_task.gnews_fetch_failed", error=str(exc))
+        logger.warning("news_task.fetch_failed", error=str(exc))
 
-    all_articles: list[dict] = rss_articles + gn_articles
+    all_articles: list[dict] = rss_articles + gn_articles + yf_articles
     if not all_articles:
         logger.info("news_task.no_articles")
         return {"status": "done", "inserted": 0}
@@ -73,6 +75,12 @@ def fetch_news_sentiment(self):
     # Explode articles with multiple symbols into separate rows
     mapped: list[dict] = []
     for article in all_articles:
+        # Yahoo Finance articles carry a direct ticker hint — no NER needed
+        ticker_hint = article.get("_ticker")
+        if ticker_hint:
+            sym = ticker_hint.removesuffix(".NS")
+            mapped.append({**article, "symbol": sym})
+            continue
         symbols = map_headline_to_symbols(
             article["title"],
             query_hint=article.get("_query"),
@@ -85,8 +93,12 @@ def fetch_news_sentiment(self):
         return {"status": "done", "inserted": 0}
 
     # ── 4. Batch FinBERT scoring ──────────────────────────────────────────────
-    headlines = [r["title"] for r in mapped]
-    scores    = score_headlines(headlines)
+    # Score headline + summary together for richer context
+    texts_to_score = [
+        (r["title"] + ". " + r["summary"]).strip() if r.get("summary") else r["title"]
+        for r in mapped
+    ]
+    scores = score_headlines(texts_to_score)
 
     rows: list[dict[str, Any]] = []
     now_utc = datetime.now(tz=timezone.utc)
@@ -98,6 +110,7 @@ def fetch_news_sentiment(self):
                            else article["published"].astimezone(timezone.utc),
             "symbol":      article["symbol"],
             "headline":    article["title"][:2000],
+            "summary":     (article.get("summary") or "")[:1000] or None,
             "source":      article["source"],
             "url":         article.get("url"),
             "sentiment":   result.sentiment,
@@ -126,10 +139,10 @@ def fetch_news_sentiment(self):
                     session.execute(
                         text("""
                             INSERT INTO news_sentiment
-                                (id, published_at, symbol, headline, source,
+                                (id, published_at, symbol, headline, summary, source,
                                  url, sentiment, score, confidence, created_at)
                             VALUES
-                                (:id, :published_at, :symbol, :headline, :source,
+                                (:id, :published_at, :symbol, :headline, :summary, :source,
                                  :url, :sentiment, :score, :confidence, :created_at)
                         """),
                         row,

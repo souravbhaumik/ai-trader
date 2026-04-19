@@ -400,6 +400,11 @@ function PipelinePanel() {
       desc: 'Auto-scheduled Mon–Fri 16:30 IST. Bhavcopy runs separately at 19:30 IST.',
       actions: <TriggerBtn label="Run Now" endpoint="/admin/pipeline/eod-ingest" icon={<RefreshCw size={12}/>}/>,
     },
+    {
+      n: 8, label: 'Download Logos', task: 'logo_download',
+      desc: 'Fetch ticker logos from logo.dev and cache locally. Incremental — new symbols get logos, existing ones are skipped.',
+      actions: <TriggerBtn label="Run Now" endpoint="/admin/pipeline/download-logos" icon={<RefreshCw size={12}/>}/>,
+    },
   ]
 
   return (
@@ -605,8 +610,14 @@ function DBBrowserModal({ onClose }: { onClose: () => void }) {
     if (!sql.trim()) return
     setLoadingRows(true); setQueryResult(null); setSelected(null)
     try {
-      const { data } = await apiClient.post<QueryResult>('/admin/browser/db/query', { sql, limit: 200 })
-      setQueryResult(data)
+      const { data } = await apiClient.post<QueryResult>('/admin/browser/db/query', { sql })
+      if (data.columns.length === 0) {
+        // DML statement — no rows returned
+        toast.success(`Query OK — ${data.count} row(s) affected.`)
+        setQueryResult({ columns: ['result'], rows: [{ result: `${data.count} row(s) affected` }], count: data.count })
+      } else {
+        setQueryResult(data)
+      }
     } catch (e: unknown) {
       toast.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? 'Query failed.')
     } finally { setLoadingRows(false) }

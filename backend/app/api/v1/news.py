@@ -45,6 +45,7 @@ class NewsArticle(BaseModel):
     id: str
     symbol: str
     headline: str
+    summary: Optional[str]
     source: str
     url: Optional[str]
     sentiment: str         # "positive" | "neutral" | "negative"
@@ -148,7 +149,7 @@ async def get_feed(
 
     rows = (await session.execute(
         text("""
-            SELECT id, symbol, headline, source, url,
+            SELECT id, symbol, headline, summary, source, url,
                    sentiment, score, confidence, published_at
             FROM   news_sentiment
             WHERE  symbol = :sym AND published_at >= :cutoff
@@ -163,12 +164,13 @@ async def get_feed(
             id=str(row[0]),
             symbol=row[1],
             headline=row[2],
-            source=row[3],
-            url=row[4],
-            sentiment=row[5],
-            score=float(row[6]),
-            confidence=float(row[7]),
-            published_at=row[8].isoformat() if hasattr(row[8], "isoformat") else str(row[8]),
+            summary=row[3],
+            source=row[4],
+            url=row[5],
+            sentiment=row[6],
+            score=float(row[7]),
+            confidence=float(row[8]),
+            published_at=row[9].isoformat() if hasattr(row[9], "isoformat") else str(row[9]),
         )
         for row in rows
     ]

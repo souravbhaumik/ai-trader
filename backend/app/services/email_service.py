@@ -85,3 +85,40 @@ def send_invite_email(*, to_email: str, registration_url: str, invited_by_name: 
 </html>
 """
     _send(to=to_email, subject=subject, html=html, text=text)
+
+
+def send_live_trading_otp_email(*, to_email: str, otp_code: str) -> None:
+    """Send a 6-digit OTP to confirm live-trading enablement."""
+    subject = "AI Trader — Live Trading Verification Code"
+    text = (
+        f"Your verification code to enable live trading is:\n\n"
+        f"  {otp_code}\n\n"
+        f"This code expires in 2 minutes.\n\n"
+        f"If you did not request this, someone may be attempting to enable live trading on your account. "
+        f"Please change your password immediately."
+    )
+    html = f"""
+<!DOCTYPE html>
+<html>
+<body style="font-family:sans-serif;background:#0f1117;color:#e2e8f0;padding:32px;">
+  <div style="max-width:480px;margin:0 auto;background:#1a1f2e;border-radius:12px;padding:32px;border:1px solid #2d3748;">
+    <h2 style="margin:0 0 8px;color:#ffffff;">Live Trading Verification</h2>
+    <p style="color:#94a3b8;margin:0 0 24px;">
+      Enter this code in the app to enable live trading on your account.
+    </p>
+    <div style="font-size:32px;font-weight:700;letter-spacing:8px;color:#3b82f6;text-align:center;
+                background:#0f1117;border-radius:8px;padding:16px 24px;margin-bottom:24px;">
+      {otp_code}
+    </div>
+    <p style="color:#64748b;font-size:12px;margin:0;">
+      This code expires in <strong>2 minutes</strong>. Never share it with anyone.
+    </p>
+    <p style="color:#475569;font-size:11px;margin-top:16px;">
+      If you did not request this, please change your password immediately.
+    </p>
+  </div>
+</body>
+</html>
+"""
+    _send(to=to_email, subject=subject, html=html, text=text)
+

@@ -1,6 +1,9 @@
 ﻿import { useEffect, useState } from 'react'
 import { Zap, TrendingUp, TrendingDown } from 'lucide-react'
 import { apiClient } from '../api/client'
+import ForecastModal from '../components/ForecastModal'
+import OrderModal, { OrderDefaults } from '../components/OrderModal'
+import TickerLogo from '../components/TickerLogo'
 
 interface Signal {
   id: string; symbol: string; ts: string; signal_type: 'BUY' | 'SELL' | 'HOLD'
@@ -25,6 +28,8 @@ export default function OpportunitiesPage() {
   const [signals, setSignals] = useState<Signal[]>([])
   const [loading, setLoading] = useState(true)
   const [filter, setFilter]   = useState<'ALL'|'BUY'|'SELL'>('ALL')
+  const [forecastSym, setForecastSym]   = useState<string | null>(null)
+  const [orderDefaults, setOrderDefaults] = useState<OrderDefaults | null>(null)
 
   useEffect(() => {
     apiClient.get<{ signals: Signal[] }>('/signals?per_page=50&active=true')
@@ -78,7 +83,12 @@ export default function OpportunitiesPage() {
                     <div className="opp-ticker">{s.symbol.replace('.NS','')}</div>
                     <div className="text-muted text-sm">{s.model_version}</div>
                   </div>
-                  <span className={`signal-badge ${s.signal_type}`}>{s.signal_type}</span>
+                  <span
+                    className={`signal-badge ${s.signal_type}`}
+                    style={{ cursor:'pointer' }}
+                    title={`Click to ${s.signal_type}`}
+                    onClick={() => setOrderDefaults({ symbol: s.symbol, direction: s.signal_type === 'SELL' ? 'SELL' : 'BUY', entryPrice: s.entry_price, targetPrice: s.target_price, stopLoss: s.stop_loss })}
+                  >{s.signal_type}</span>
                 </div>
                 <div className="opp-score-row">
                   <span className="text-sm text-muted">Confidence</span>
@@ -101,11 +111,26 @@ export default function OpportunitiesPage() {
                 <div className="text-muted text-sm" style={{ marginTop:8 }}>
                   {new Date(s.ts + 'Z').toLocaleString('en-IN', { dateStyle:'short', timeStyle:'short' })}
                 </div>
+
+                {/* Action buttons */}
+                <div style={{ display:'flex', gap:6, marginTop:12 }}>
+                  <button
+                    className="btn-outline btn"
+                    style={{ flex:1, padding:'7px 10px', fontSize:12 }}
+                    onClick={() => setForecastSym(s.symbol)}
+                    title="AI Forecast"
+                  >
+                    📈 Forecast
+                  </button>
+                </div>
               </div>
             )
           })}
         </div>
       )}
+
+      <ForecastModal symbol={forecastSym} onClose={() => setForecastSym(null)} />
+      <OrderModal defaults={orderDefaults} onClose={() => setOrderDefaults(null)} />
     </div>
   )
 }

@@ -1,13 +1,17 @@
 ﻿"""Settings API — read and update user trading preferences."""
 from __future__ import annotations
 
+import random
+import string
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Annotated, Optional
 
 import structlog
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlmodel import select
 
 from app.api.v1.deps import get_current_user, get_current_user_settings
 from app.core.database import get_session
@@ -108,3 +112,94 @@ async def update_settings(
         notification_news=user_settings.notification_news,
         preferred_broker=user_settings.preferred_broker,
     )
+
+
+# ── Live-trading enablement (email OTP gate) ──────────────────────────────────
+
+_OTP_TTL    = 120     # seconds — code expires after 2 minutes
+_OTP_DIGITS = 6
+
+
+def _otp_redis_key(user_id) -> str:
+    return f"live_enable_otp:{user_id}"
+
+
+class EnableLiveTradingResponse(BaseModel):
+    detail: str
+
+
+class ConfirmLiveTradingRequest(BaseModel):
+    code: str
+
+
+@router.post(
+    "/live-trading/enable",
+    response_model=EnableLiveTradingResponse,
+    summary="Request a 6-digit OTP to enable live trading",
+)
+async def request_live_trading_otp(
+    user: Annotated[User, Depends(get_current_user)],
+):
+    """Send a one-time passcode to the user's email address.
+
+    The user must call ``POST /settings/live-trading/confirm`` with the code
+    within 2 minutes to flip ``is_live_trading_enabled = true``.
+    """
+    if user.is_live_trading_enabled:
+        return EnableLiveTradingResponse(detail="Live trading is already enabled.")
+
+    code = "".join(random.choices(string.digits, k=_OTP_DIGITS))
+
+    from app.core.redis_client import get_redis
+    redis = get_redis()
+    await redis.set(_otp_redis_key(user.id), code, ex=_OTP_TTL)
+
+    # Send OTP via email (no-op if SMTP not configured)
+    from app.services.email_service import send_live_trading_otp_email  # noqa: PLC0415
+    send_live_trading_otp_email(to_email=user.email, otp_code=code)
+
+    logger.info("live_trading.otp_sent", user_id=str(user.id))
+    return EnableLiveTradingResponse(
+        detail=f"A 6-digit code has been sent to {user.email}. It expires in 2 minutes."
+    )
+
+
+@router.post(
+    "/live-trading/confirm",
+    response_model=EnableLiveTradingResponse,
+    summary="Confirm OTP and enable live trading",
+)
+async def confirm_live_trading_otp(
+    body: ConfirmLiveTradingRequest,
+    user: Annotated[User, Depends(get_current_user)],
+    session: AsyncSession = Depends(get_session),
+):
+    """Verify the OTP and set ``is_live_trading_enabled = true``."""
+    if user.is_live_trading_enabled:
+        return EnableLiveTradingResponse(detail="Live trading is already enabled.")
+
+    from app.core.redis_client import get_redis
+    redis = get_redis()
+    stored = await redis.get(_otp_redis_key(user.id))
+
+    if stored is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "OTP expired or never requested. Call /settings/live-trading/enable first.")
+
+    stored_str = stored.decode() if isinstance(stored, bytes) else stored
+    if stored_str != body.code.strip():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid OTP code.")
+
+    # Verified — enable live trading and delete OTP
+    await redis.delete(_otp_redis_key(user.id))
+
+    result = await session.execute(select(User).where(User.id == user.id))
+    db_user = result.scalar_one()
+    db_user.is_live_trading_enabled = True
+    db_user.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    session.add(db_user)
+    await session.commit()
+
+    logger.info("live_trading.enabled", user_id=str(user.id))
+    return EnableLiveTradingResponse(detail="Live trading has been enabled for your account.")
+

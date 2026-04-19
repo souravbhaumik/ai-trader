@@ -182,3 +182,70 @@ async def delete_user(
     await session.commit()
     logger.info("admin.user_deleted", deleted_user=str(user_id), deleted_email=email, by_admin=str(admin.id))
     return UserDeleteResponse(id=user_id, email=email, deleted=True)
+
+
+# ── Global live-trading kill switch ───────────────────────────────────────────
+
+class KillSwitchResponse(BaseModel):
+    disabled_count: int
+    detail: str
+
+
+@router.delete(
+    "/live-trading",
+    response_model=KillSwitchResponse,
+    summary="Kill switch — disable live trading for ALL users immediately",
+)
+async def kill_switch_live_trading(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    """Set ``is_live_trading_enabled = false`` for every user in the system.
+
+    Also flips every user_settings row with ``trading_mode = 'live'`` back to
+    ``'paper'`` so no pending order-placement tasks can slip through.
+
+    This is an irreversible batch operation — users must individually re-enable
+    live trading via the OTP flow.
+    """
+    admin = await _require_admin(request, session)
+
+    from sqlalchemy import update as sa_update, func  # noqa: PLC0415
+    from datetime import datetime, timezone  # noqa: PLC0415
+
+    now_ts = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    # Disable is_live_trading_enabled on every user
+    update_users = (
+        sa_update(User)
+        .where(User.is_live_trading_enabled == True)  # noqa: E712
+        .values(is_live_trading_enabled=False, updated_at=now_ts)
+        .returning(User.id)
+    )
+    result = await session.execute(update_users)
+    disabled_count = len(result.fetchall())
+
+    # Also flip trading_mode back to paper for all live-mode users
+    from app.models.user_settings import UserSettings  # noqa: PLC0415
+    await session.execute(
+        sa_update(UserSettings)
+        .where(UserSettings.trading_mode == "live")
+        .values(trading_mode="paper", updated_at=now_ts)
+    )
+
+    await session.commit()
+
+    logger.warning(
+        "admin.kill_switch_activated",
+        by_admin=str(admin.id),
+        disabled_count=disabled_count,
+    )
+
+    return KillSwitchResponse(
+        disabled_count=disabled_count,
+        detail=(
+            f"Live trading disabled for {disabled_count} user(s). "
+            "All accounts have been switched to paper trading."
+        ),
+    )
+

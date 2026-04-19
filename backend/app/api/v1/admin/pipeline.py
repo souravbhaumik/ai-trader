@@ -510,7 +510,50 @@ async def trigger_populate_universe(
     )
 
 
-# ── Pipeline status overview ──────────────────────────────────────────────────
+# ── Logo download ─────────────────────────────────────────────────────────────
+
+@router.post(
+    "/download-logos",
+    response_model=TaskEnqueuedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def trigger_download_logos(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    """Download logos for all active symbols from logo.dev and update logo_path in DB.
+
+    Safe to re-run: symbols that already have a cached PNG are skipped.
+    New symbols added to stock_universe will get their logos on the next run.
+    """
+    await _require_admin(request, session)
+
+    import asyncio
+    import threading
+    import uuid
+
+    task_id = str(uuid.uuid4())
+
+    def _run() -> None:
+        import sys
+        from pathlib import Path
+        # The download script is at /app/scripts/download_logos.py inside the container
+        script = Path(__file__).parents[5] / "scripts" / "download_logos.py"
+        sys.path.insert(0, str(script.parent.parent))
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("download_logos", script)
+        mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        asyncio.run(mod.run())
+
+    thread = threading.Thread(target=_run, daemon=True, name="logo-download")
+    thread.start()
+
+    logger.info("pipeline.download_logos_started", task_id=task_id)
+    return TaskEnqueuedResponse(
+        task_id=task_id,
+        message="Logo download started in background. Check backend logs for progress.",
+    )
 
 _ALL_TASK_NAMES = [
     "universe_population",

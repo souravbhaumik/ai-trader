@@ -2,6 +2,10 @@
 import { Wallet, Activity, Target, Clock, TrendingUp, TrendingDown } from 'lucide-react'
 import { apiClient } from '../api/client'
 import { useAuthStore } from '../store/authStore'
+import { useState } from 'react'
+import ForecastModal from '../components/ForecastModal'
+import OrderModal, { OrderDefaults } from '../components/OrderModal'
+import TickerLogo from '../components/TickerLogo'
 
 interface IndexQuote {
   symbol: string; price: number; change: number; change_pct: number; name?: string
@@ -52,6 +56,8 @@ function IndexPill({ q }: { q: IndexQuote }) {
 
 export default function DashboardPage() {
   const tradingMode = useAuthStore(s => s.tradingMode)
+  const [forecastSym, setForecastSym]     = useState<string | null>(null)
+  const [orderDefaults, setOrderDefaults] = useState<OrderDefaults | null>(null)
   const { data: indicesData, isLoading: indicesLoading } = useQuery({
     queryKey: ['indices'],
     queryFn: () => apiClient.get('/prices/indices').then(r => r.data),
@@ -62,7 +68,15 @@ export default function DashboardPage() {
   })
   const { data: portfolioData } = useQuery<PortfolioSummary>({
     queryKey: ['portfolio-summary'],
-    queryFn: () => apiClient.get('/portfolio/paper/summary').then(r => r.data),
+    queryFn: () => apiClient.get('/portfolio/paper/summary').then(r => {
+      const d = r.data
+      return {
+        ...d,
+        cash_balance: Number(d.cash_balance),
+        open_value:   Number(d.open_value),
+        realized_pnl: Number(d.realized_pnl),
+      } as PortfolioSummary
+    }),
     refetchInterval: 30_000,
   })
 
@@ -115,8 +129,6 @@ export default function DashboardPage() {
           {indices.map(q => <IndexPill key={q.symbol} q={q} />)}
         </div>
       )}
-
-      {/* ── Content ──────────────────────────────────────────────────────── */}
       <div className="dash-split">
         <div className="card card-glow">
           <div className="card-header"><span className="card-title">Recent Signals</span></div>
@@ -130,16 +142,36 @@ export default function DashboardPage() {
           ) : (
             <table className="data-table">
               <thead><tr>
-                <th>Symbol</th><th>Signal</th><th>Confidence</th><th>Entry</th><th>Time</th>
+                <th>Symbol</th><th>Signal</th><th>Confidence</th><th>Entry</th><th>Time</th><th>Forecast</th>
               </tr></thead>
               <tbody>
                 {signals.map(s => (
                   <tr key={s.id}>
-                    <td className="text-mono">{s.symbol}</td>
-                    <td><span className={`signal-badge ${s.signal_type}`}>{s.signal_type}</span></td>
+                    <td>
+                      <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                        <TickerLogo symbol={s.symbol} size={26} />
+                        <span className="text-mono" style={{ fontWeight:600 }}>{s.symbol.replace('.NS','')}</span>
+                      </div>
+                    </td>
+                    <td>
+                      <span
+                        className={`signal-badge ${s.signal_type}`}
+                        style={{ cursor: s.signal_type !== 'HOLD' ? 'pointer' : undefined }}
+                        title={s.signal_type !== 'HOLD' ? `Click to ${s.signal_type}` : undefined}
+                        onClick={() => s.signal_type !== 'HOLD' && setOrderDefaults({ symbol: s.symbol, direction: s.signal_type === 'SELL' ? 'SELL' : 'BUY', entryPrice: s.entry_price, targetPrice: s.target_price, stopLoss: null })}
+                      >{s.signal_type}</span>
+                    </td>
                     <td className="text-mono">{(s.confidence * 100).toFixed(0)}%</td>
                     <td className="text-mono">{s.entry_price != null ? `₹${s.entry_price.toLocaleString('en-IN')}` : '—'}</td>
                     <td className="text-muted text-sm">{new Date(s.ts + 'Z').toLocaleTimeString('en-IN', { timeStyle:'short' })}</td>
+                    <td>
+                      <button
+                        className="btn-outline btn"
+                        style={{ padding:'3px 7px', fontSize:11 }}
+                        onClick={() => setForecastSym(s.symbol)}
+                        title="AI Forecast"
+                      >📈</button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -176,6 +208,9 @@ export default function DashboardPage() {
           )}
         </div>
       </div>
+
+      <ForecastModal symbol={forecastSym} onClose={() => setForecastSym(null)} />
+      <OrderModal defaults={orderDefaults} onClose={() => setOrderDefaults(null)} />
     </div>
   )
 }

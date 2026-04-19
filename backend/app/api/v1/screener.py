@@ -60,3 +60,24 @@ async def get_sectors(
     """Return all distinct sectors from the stock universe."""
     sectors = await screener_service.get_sectors(session)
     return {"sectors": sectors}
+
+
+@router.get("/universe/search")
+async def universe_search(
+    user: Annotated[User, Depends(get_current_user)],
+    session: AsyncSession = Depends(get_session),
+    q: str = Query("", min_length=1, max_length=100),
+):
+    """Autocomplete search over the stock universe (symbol or name)."""
+    from sqlalchemy import text
+    pattern = f"%{q}%"
+    result = await session.execute(
+        text(
+            "SELECT symbol, name, exchange FROM stock_universe "
+            "WHERE symbol ILIKE :q OR name ILIKE :q "
+            "ORDER BY CASE WHEN symbol ILIKE :exact THEN 0 ELSE 1 END, symbol "
+            "LIMIT 20"
+        ),
+        {"q": pattern, "exact": f"{q}%"},
+    )
+    return [dict(r._mapping) for r in result]

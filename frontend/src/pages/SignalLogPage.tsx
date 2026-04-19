@@ -1,7 +1,11 @@
-﻿import { useState } from 'react'
+﻿import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Activity, ChevronUp, ChevronDown, ChevronsUpDown, ChevronLeft, ChevronRight } from 'lucide-react'
+import { Activity, ChevronUp, ChevronDown, ChevronsUpDown, ChevronLeft, ChevronRight, Radio } from 'lucide-react'
 import { apiClient } from '../api/client'
+import { useSignalStream } from '../hooks/useSignalStream'
+import ForecastModal from '../components/ForecastModal'
+import OrderModal, { OrderDefaults } from '../components/OrderModal'
+import TickerLogo from '../components/TickerLogo'
 
 interface Signal {
   id: string; symbol: string; ts: string; signal_type: 'BUY' | 'SELL' | 'HOLD'
@@ -18,8 +22,13 @@ export default function SignalLogPage() {
   const [active, setActive]   = useState(false)
   const [page, setPage]       = useState(1)
   const [sortDir, setSortDir] = useState<SortDir>('desc')
+  const [forecastSym, setForecastSym]     = useState<string | null>(null)
+  const [orderDefaults, setOrderDefaults] = useState<OrderDefaults | null>(null)
 
   const PER_PAGE = 50
+
+  // Live WebSocket stream — new signals arrive in real-time on page 1
+  const { signals: liveSignals, connected: wsConnected } = useSignalStream(page === 1)
 
   const { data: result, isFetching: loading } = useQuery({
     queryKey: ['signals', filter, active, page, sortDir],
@@ -32,8 +41,22 @@ export default function SignalLogPage() {
     placeholderData: (prev) => prev,
   })
 
+  // On page 1, prepend live WS signals (deduped) in front of the REST results
+  const displaySignals = useMemo<Signal[]>(() => {
+    const restSignals = result?.signals ?? []
+    if (page !== 1 || liveSignals.length === 0) return restSignals
+    const restIds = new Set(restSignals.map(s => s.id))
+    const freshLive = liveSignals.filter(s =>
+      !restIds.has(s.id) &&
+      (filter === 'ALL' || s.signal_type === filter) &&
+      (!active || s.is_active)
+    ) as Signal[]
+    const merged = [...freshLive, ...restSignals]
+    return sortDir === 'asc' ? [...merged].reverse() : merged
+  }, [liveSignals, result, page, filter, active, sortDir])
+
   const totalPages = result ? Math.ceil(result.total / PER_PAGE) : 1
-  const isEmpty    = !loading && (result?.signals.length ?? 0) === 0
+  const isEmpty    = !loading && displaySignals.length === 0
 
   return (
     <div className="signal-page">
@@ -45,6 +68,12 @@ export default function SignalLogPage() {
           </p>
         </div>
         <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+          {/* Live indicator */}
+          <span style={{ display:'flex', alignItems:'center', gap:4, fontSize:11,
+                         color: wsConnected ? 'var(--accent-green)' : 'var(--text-muted)' }}>
+            <Radio size={12} />
+            {wsConnected ? 'LIVE' : 'connecting…'}
+          </span>
           {(['ALL','BUY','SELL','HOLD'] as FilterType[]).map(f => (
             <button key={f} onClick={() => setFilter(f)}
               className={`filter-chip ${filter === f ? 'active' : ''}`}>{f}</button>
@@ -73,23 +102,44 @@ export default function SignalLogPage() {
                     Time {sortDir === 'asc' ? <ChevronUp size={11}/> : <ChevronDown size={11}/>}
                   </th>
                   <th>Symbol</th><th>Signal</th><th>Confidence</th>
-                  <th>Entry</th><th>Target</th><th>SL</th><th>Model</th><th>Status</th>
+                  <th>Entry</th><th>Target</th><th>SL</th><th>Model</th><th>Status</th><th>Forecast</th>
                 </tr>
               </thead>
               <tbody>
-                {result!.signals.map(s => (
-                  <tr key={s.id}>
+                {displaySignals.map(s => (
+                  <tr key={s.id} style={liveSignals.some(l => l.id === s.id && page === 1)
+                      ? { animation: 'fadeInRow 0.4s ease' } : undefined}>
                     <td className="text-muted text-sm">
                       {new Date(s.ts + 'Z').toLocaleString('en-IN', { dateStyle:'short', timeStyle:'short' })}
                     </td>
-                    <td className="text-mono" style={{ fontWeight:600 }}>{s.symbol.replace('.NS','')}</td>
-                    <td><span className={`signal-badge ${s.signal_type}`}>{s.signal_type}</span></td>
+                    <td>
+                      <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                        <TickerLogo symbol={s.symbol} size={28} />
+                        <span className="text-mono" style={{ fontWeight:600 }}>{s.symbol.replace('.NS','')}</span>
+                      </div>
+                    </td>
+                    <td>
+                      <span
+                        className={`signal-badge ${s.signal_type}`}
+                        style={{ cursor: s.signal_type !== 'HOLD' ? 'pointer' : undefined }}
+                        title={s.signal_type !== 'HOLD' ? `Click to ${s.signal_type}` : undefined}
+                        onClick={() => s.signal_type !== 'HOLD' && setOrderDefaults({ symbol: s.symbol, direction: s.signal_type === 'SELL' ? 'SELL' : 'BUY', entryPrice: s.entry_price, targetPrice: s.target_price, stopLoss: s.stop_loss })}
+                      >{s.signal_type}</span>
+                    </td>
                     <td className="text-mono text-sm">{(s.confidence * 100).toFixed(0)}%</td>
                     <td className="text-mono text-sm">{s.entry_price  != null ? `₹${s.entry_price.toLocaleString('en-IN')}` : '—'}</td>
                     <td className="text-mono text-sm">{s.target_price != null ? `₹${s.target_price.toLocaleString('en-IN')}` : '—'}</td>
                     <td className="text-mono text-sm">{s.stop_loss    != null ? `₹${s.stop_loss.toLocaleString('en-IN')}` : '—'}</td>
                     <td className="text-muted text-sm">{s.model_version}</td>
                     <td><span className={`risk-badge ${s.is_active ? 'low' : 'med'}`}>{s.is_active ? 'OPEN' : 'CLOSED'}</span></td>
+                    <td>
+                      <button
+                        className="btn-outline btn"
+                        style={{ padding:'3px 7px', fontSize:11 }}
+                        onClick={() => setForecastSym(s.symbol)}
+                        title="AI Forecast"
+                      >📈</button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -102,6 +152,10 @@ export default function SignalLogPage() {
           </>
         )}
       </div>
+
+      <ForecastModal symbol={forecastSym} onClose={() => setForecastSym(null)} />
+      <OrderModal defaults={orderDefaults} onClose={() => setOrderDefaults(null)} />
     </div>
   )
 }
+

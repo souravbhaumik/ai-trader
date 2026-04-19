@@ -75,6 +75,77 @@ async def _get_user_adapter(user_id: uuid.UUID, db: AsyncSession):
 
 # ── Public API ─────────────────────────────────────────────────────────────────
 
+async def _enforce_daily_loss_limit(user_id: uuid.UUID, db: AsyncSession) -> None:
+    """Raise ValueError if the user has exceeded their daily loss limit.
+
+    Computes today's realised P&L from completed SELL orders:
+      loss = sum((price - avg_fill_price) * filled_qty)  for SELL orders
+    where a negative value means a net loss.
+
+    If |loss| > daily_loss_limit_pct % of paper_balance, the user's
+    trading_mode is flipped to 'paper' and a ValueError is raised.
+    """
+    from datetime import date  # noqa: PLC0415
+
+    # IST midnight = UTC midnight - 5h30m; use UTC date for simplicity (conservative)
+    today_start = datetime.combine(date.today(), datetime.min.time())
+
+    # Sum of (avg_fill_price - price) * filled_qty for completed SELL orders today.
+    # A positive result here means the user sold below their order price → loss.
+    result = await db.execute(
+        text("""
+            SELECT COALESCE(SUM((price - avg_fill_price) * filled_qty), 0) AS realised_pnl
+            FROM   live_orders
+            WHERE  user_id   = :uid
+              AND  direction  = 'SELL'
+              AND  status     = 'COMPLETE'
+              AND  placed_at >= :today
+        """),
+        {"uid": str(user_id), "today": today_start},
+    )
+    realised_pnl = float(result.scalar() or 0)
+    # negative realised_pnl = net loss
+    if realised_pnl >= 0:
+        return  # profit or break-even — no limit breach
+
+    loss_amount = abs(realised_pnl)
+
+    settings_row = await db.execute(
+        text("SELECT paper_balance, daily_loss_limit_pct FROM user_settings WHERE user_id = :uid"),
+        {"uid": str(user_id)},
+    )
+    settings_row = settings_row.first()
+    if not settings_row:
+        return
+
+    portfolio_value  = float(settings_row.paper_balance)
+    limit_pct        = float(settings_row.daily_loss_limit_pct)
+    limit_amount     = portfolio_value * limit_pct / 100.0
+
+    if loss_amount >= limit_amount:
+        # Flip to paper trading
+        await db.execute(
+            text("""
+                UPDATE user_settings
+                SET    trading_mode = 'paper',
+                       updated_at   = :now
+                WHERE  user_id = :uid
+            """),
+            {"uid": str(user_id), "now": _now()},
+        )
+        await db.commit()
+        logger.warning(
+            "live_trade.daily_loss_limit_reached",
+            user_id=str(user_id),
+            loss_amount=loss_amount,
+            limit_amount=limit_amount,
+        )
+        raise ValueError(
+            f"Daily loss limit reached (₹{loss_amount:,.2f} ≥ {limit_pct}% of portfolio). "
+            "Switched to paper trading."
+        )
+
+
 async def place_live_order(
     db: AsyncSession,
     *,
@@ -93,6 +164,9 @@ async def place_live_order(
     Raises ValueError / RuntimeError with human-readable messages on failure.
     """
     adapter = await _get_user_adapter(user_id, db)
+
+    # ── Daily loss limit check ─────────────────────────────────────────────────
+    await _enforce_daily_loss_limit(user_id, db)
 
     # Pre-insert with PENDING status so we have a DB record even if API crashes.
     # order_id is also used as the idempotency ``order_tag`` sent to the broker.

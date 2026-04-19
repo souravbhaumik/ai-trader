@@ -96,11 +96,10 @@ async def table_rows(
     return {"columns": columns, "rows": rows}
 
 
-# ── DB: custom SQL query (SELECT only) ───────────────────────────────────────
+# ── DB: custom SQL query ──────────────────────────────────────────────────────
 
 class QueryRequest(BaseModel):
     sql: str
-    limit: int = 100
 
 
 @router.post("/db/query")
@@ -110,20 +109,24 @@ async def run_query(
     session: AsyncSession = Depends(get_session),
 ) -> dict:
     await _require_admin(request, session)
-    sql = body.sql.strip()
-    # Safety: only allow SELECT / WITH / EXPLAIN
+    sql = body.sql.strip().rstrip(";").strip()
+    # Block PL/pgSQL anonymous blocks only (DO $$ ... $$)
     normalized = sql.upper().lstrip()
-    if not (normalized.startswith("SELECT") or normalized.startswith("WITH") or normalized.startswith("EXPLAIN")):
-        raise HTTPException(400, "Only SELECT / WITH / EXPLAIN queries are allowed.")
-    limit = max(1, min(body.limit, 500))
+    if normalized.startswith("DO"):
+        raise HTTPException(400, "PL/pgSQL anonymous blocks (DO) are not allowed.")
     try:
-        result = await session.execute(
-            text(f"SELECT * FROM ({sql}) _q LIMIT :lim"), {"lim": limit}
-        )
-        columns = list(result.keys())
-        rows = [_serialize_row(dict(zip(columns, r))) for r in result.fetchall()]
-        return {"columns": columns, "rows": rows, "count": len(rows)}
+        result = await session.execute(text(sql))
+        await session.commit()
+        try:
+            columns = list(result.keys())
+            rows = [_serialize_row(dict(zip(columns, r))) for r in result.fetchall()]
+        except Exception:
+            # Non-SELECT statements (UPDATE/INSERT/DELETE) return no rows
+            columns = []
+            rows = []
+        return {"columns": columns, "rows": rows, "count": result.rowcount if result.rowcount >= 0 else len(rows)}
     except Exception as exc:
+        await session.rollback()
         raise HTTPException(400, str(exc)) from exc
 
 

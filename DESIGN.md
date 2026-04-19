@@ -36,13 +36,14 @@
 10. [Configuration Management](#10-configuration-management)
 11. [Error Handling Strategy](#11-error-handling-strategy)
 12. [Frontend Design (Web)](#12-frontend-design-web)
-13. [Mobile App Design](#13-mobile-app-design)
-14. [Admin Panel](#14-admin-panel)
-15. [Security Design](#15-security-design)
-16. [Docker & Infrastructure](#16-docker--infrastructure)
-17. [Development Phases](#17-development-phases)
-18. [Future Hosting Plan](#18-future-hosting-plan)
-19. [Testing & CI/CD Strategy](#19-testing--cicd-strategy)
+13. [IP Rotation Library (Personal Use)](#13-ip-rotation-library-personal-use)
+14. [Mobile App Design](#14-mobile-app-design)
+15. [Admin Panel](#15-admin-panel)
+16. [Security Design](#16-security-design)
+17. [Docker & Infrastructure](#17-docker--infrastructure)
+18. [Development Phases](#18-development-phases)
+19. [Future Hosting Plan](#19-future-hosting-plan)
+20. [Testing & CI/CD Strategy](#20-testing--cicd-strategy)
 
 ---
 
@@ -1795,7 +1796,171 @@ When the client's WebSocket connection to the FastAPI backend drops, `priceStore
 
 ---
 
-## 13. Mobile App Design
+## 13. IP Rotation Library (Personal Use)
+
+> **Status**: Planned — to be implemented before the Mobile App phase.  
+> **Scope**: Internal-only Python library (`backend/app/lib/ip_rotator.py`) for personal, non-commercial use on this closed system.
+
+### 13.1 Purpose
+
+The news pipeline fetches per-symbol articles from Google News (`gnews`) and Yahoo Finance (`yfinance`). Both sources implement IP-based rate limiting. This library provides transparent, pluggable outbound IP rotation so the Celery news task can query more symbols per cycle without hitting rate caps.
+
+RSS feeds (ET Markets, Moneycontrol, Business Standard, etc.) do **not** require rotation — they are open feeds with no per-IP limits and are excluded from this library's scope.
+
+---
+
+### 13.2 Architecture
+
+```
+backed/app/lib/
+└── ip_rotator/
+    ├── __init__.py          # Public API: get_session(), rotate()
+    ├── base.py              # Abstract RotatorBackend
+    ├── proxy_list.py        # Backend: static proxy list (round-robin / random)
+    ├── tor.py               # Backend: Tor SOCKS5 (stem controller)
+    ├── vpn_cli.py           # Backend: OS-level VPN CLI (Mullvad / ProtonVPN)
+    └── health.py            # Proxy health-check & dead-proxy eviction
+```
+
+The library is **backend-agnostic** — callers pick a backend via config; the rest of the codebase only touches the public API.
+
+---
+
+### 13.3 Public API
+
+```python
+from app.lib.ip_rotator import IPRotator
+
+rotator = IPRotator.from_settings()  # reads backend choice from .env
+
+# Returns a pre-configured requests.Session with the next outbound IP
+with rotator.session() as s:
+    resp = s.get("https://news.google.com/...", timeout=10)
+
+# Explicitly trigger a rotation (e.g. after a 429 response)
+rotator.rotate()
+```
+
+`IPRotator.from_settings()` reads `IP_ROTATOR_BACKEND` from the environment:
+
+| Value | Backend used |
+|---|---|
+| `proxy_list` | Static SOCKS5/HTTP proxy pool (default) |
+| `tor` | Tor network via `stem` |
+| `vpn_cli` | OS VPN CLI (Mullvad / ProtonVPN) |
+| `none` | No rotation — plain `requests.Session` (dev/default) |
+
+---
+
+### 13.4 Backend Designs
+
+#### 13.4.1 Proxy List Backend
+
+- Proxies loaded from `IP_ROTATOR_PROXY_LIST` env var (newline-separated `socks5://user:pass@host:port` URIs) or a local file path
+- Strategy: `round_robin` (default) or `random` (configurable via `IP_ROTATOR_STRATEGY`)
+- Each proxy is wrapped in a `ProxyEntry` dataclass tracking: `uri`, `fail_count`, `last_used`, `is_dead`
+- Dead-proxy eviction: if a proxy returns 3 consecutive connection errors or 429s, it is marked dead and skipped
+- Health check (`health.py`): background thread pings `https://httpbin.org/ip` through each proxy every 10 minutes; revives dead proxies that pass
+- Thread-safe: `threading.Lock` guards the proxy index and dead-proxy set
+
+```python
+@dataclass
+class ProxyEntry:
+    uri: str
+    fail_count: int = 0
+    last_used: datetime | None = None
+    is_dead: bool = False
+```
+
+#### 13.4.2 Tor Backend
+
+- Requires Tor daemon running (added as optional Docker service `tor` in `docker-compose.yml`)
+- Uses `stem` library to send a `NEWNYM` signal to the Tor control port — forces a new circuit (new exit IP)
+- Minimum rotation interval: 10 seconds (Tor enforces this)
+- Proxy URI: `socks5h://127.0.0.1:9050` (the `h` suffix delegates DNS to Tor, preventing DNS leaks)
+- Limitation: Tor exit nodes are blocked by Google and Yahoo in most cases — this backend is a fallback only
+
+```python
+from stem import Signal
+from stem.control import Controller
+
+def new_tor_circuit():
+    with Controller.from_port(port=9051) as ctrl:
+        ctrl.authenticate(password=settings.TOR_CONTROL_PASSWORD)
+        ctrl.signal(Signal.NEWNYM)
+```
+
+#### 13.4.3 VPN CLI Backend
+
+- Calls the host VPN's CLI tool between batches of requests (not between every request — too slow)
+- Rotation is triggered at the **task level**, not per-request: once per `fetch_google_news()` / `fetch_yahoo_finance_news()` call
+- Supported CLIs:
+  - **Mullvad**: `mullvad relay set location in` → `mullvad connect`
+  - **ProtonVPN**: `protonvpn-cli connect --random`
+- CLI path configurable via `IP_ROTATOR_VPN_CLI` env var
+- Post-rotation wait: 4 seconds (configurable via `IP_ROTATOR_VPN_WAIT_SEC`) for new IP to establish before requests resume
+- This backend requires the Docker container to run with `network_mode: host` or have the VPN CLI mounted into the container — document in `docker-compose.yml` comments
+
+---
+
+### 13.5 Integration with News Pipeline
+
+The Celery news task (`app/tasks/news_sentiment.py`) is the only caller:
+
+```python
+from app.lib.ip_rotator import IPRotator
+
+rotator = IPRotator.from_settings()  # no-op if backend = "none"
+
+# Before targeted fetches:
+rotator.rotate()                     # switch IP
+with rotator.session() as s:
+    gn_articles = fetch_google_news(top_queries, session=s)
+
+rotator.rotate()
+with rotator.session() as s:
+    yf_articles = fetch_yahoo_finance_news(top_names, session=s)
+```
+
+`fetch_google_news` and `fetch_yahoo_finance_news` in `news_fetcher.py` gain an optional `session: requests.Session | None = None` parameter. If `None`, they use their own default session (current behaviour, no breaking change).
+
+---
+
+### 13.6 Configuration (Environment Variables)
+
+| Variable | Default | Description |
+|---|---|---|
+| `IP_ROTATOR_BACKEND` | `none` | `none` / `proxy_list` / `tor` / `vpn_cli` |
+| `IP_ROTATOR_PROXY_LIST` | _(empty)_ | Newline-separated proxy URIs or file path |
+| `IP_ROTATOR_STRATEGY` | `round_robin` | `round_robin` or `random` (proxy_list backend) |
+| `IP_ROTATOR_VPN_CLI` | `mullvad` | `mullvad` or `protonvpn-cli` |
+| `IP_ROTATOR_VPN_WAIT_SEC` | `4` | Seconds to wait after VPN reconnect |
+| `TOR_CONTROL_PORT` | `9051` | Tor control port |
+| `TOR_CONTROL_PASSWORD` | _(empty)_ | Tor control port password |
+
+All variables are read via Pydantic `Settings` in `app/core/config.py` — no hardcoded values anywhere.
+
+---
+
+### 13.7 Docker Changes (when implemented)
+
+- Add optional `tor` service to `docker-compose.yml` (image: `dperson/torproxy`)
+- `celery-worker` service gains optional `network_mode: host` comment for VPN CLI backend
+- New `IP_ROTATOR_*` vars added to `.env.example` with `none` defaults so existing setups are unaffected
+
+---
+
+### 13.8 Dependencies to Add (when implemented)
+
+```
+stem==1.8.2          # Tor control (tor backend only)
+```
+
+`requests` is already a transitive dependency. `socks` support via `requests[socks]` (adds `PySocks`) — add to `requirements.txt` when implementing.
+
+---
+
+## 14. Mobile App Design
 
 **Framework**: React Native with Expo (managed workflow)
 
@@ -1906,7 +2071,7 @@ This prevents accumulation of dead tokens that silently bloat the push delivery 
 
 ---
 
-## 14. Admin Panel
+## 15. Admin Panel
 
 Accessible only to users with `role = admin`. Rendered under `/admin/*` in Next.js with an admin layout guard. Every admin action is written to an immutable `admin_audit_log` table (action, target, before/after snapshot, timestamp, admin user ID) — admins can see every change ever made.
 
@@ -2157,7 +2322,7 @@ All changes written to `admin_audit_log` with before/after values.
 
 ---
 
-## 15. Security Design
+## 16. Security Design
 
 | Threat                       | Mitigation                                                                              |
 |------------------------------|-----------------------------------------------------------------------------------------|
@@ -2180,7 +2345,7 @@ All changes written to `admin_audit_log` with before/after values.
 
 ---
 
-## 16. Docker & Infrastructure
+## 17. Docker & Infrastructure
 
 ### Services (docker-compose.yml)
 
@@ -2334,7 +2499,7 @@ The `.env` file on VPS is `chmod 600` and owned by `deploy` only.
 
 ---
 
-## 17. Development Phases
+## 18. Development Phases
 
 ### Phase 1 — Foundation
 - [ ] Project scaffold: Docker Compose, folder structure
@@ -2422,7 +2587,7 @@ The `.env` file on VPS is `chmod 600` and owned by `deploy` only.
 
 ---
 
-## 18. Future Hosting Plan
+## 19. Future Hosting Plan
 
 ### Development (now)
 - Full Docker Compose on laptop (Windows + WSL2 + RTX 3050)
@@ -2544,7 +2709,7 @@ CREATE TABLE backup_drills (
 
 ---
 
-## 19. Testing & CI/CD Strategy
+## 20. Testing & CI/CD Strategy
 
 ### Unit Tests vs Integration Tests
 

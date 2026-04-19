@@ -20,6 +20,7 @@ class StockUniverse(SQLModel, table=True):
     is_active: bool = Field(default=True)
     in_nifty50: bool = Field(default=False)
     in_nifty500: bool = Field(default=False)
+    logo_path: Optional[str] = Field(default=None, max_length=300)  # local PNG path
 
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None)

@@ -33,6 +33,11 @@ _RSS_FEEDS: dict[str, str] = {
     "livemint":       "https://www.livemint.com/rss/markets",
     "nse_corp":       "https://www.nseindia.com/corporates/rss/allAnnouncements.xml",
     "bse_corp":       "https://api.bseindia.com/BseIndiaAPI/api/RssFeed/w?flag=13",
+    # Additional sources for broader coverage
+    "hindu_bl":       "https://www.thehindubusinessline.com/markets/?service=rss",
+    "financial_exp":  "https://www.financialexpress.com/market/feed/",
+    "ndtv_profit":    "https://feeds.feedburner.com/ndtvprofit-latest",
+    "zee_biz":        "https://www.zeebiz.com/rss",
 }
 
 # Max hours in the past to consider an article "fresh"
@@ -89,8 +94,12 @@ def fetch_rss() -> list[dict]:
                 title = re.sub(r"<[^>]+>", "", entry.get("title", "")).strip()
                 if not title:
                     continue
+                raw_summary = entry.get("summary") or entry.get("description") or ""
+                summary = re.sub(r"<[^>]+>", "", raw_summary).strip()
+                summary = summary[:800] if summary else None
                 articles.append({
                     "title":     title,
+                    "summary":   summary,
                     "url":       entry.get("link"),
                     "published": published or datetime.now(tz=timezone.utc),
                     "source":    source,
@@ -99,6 +108,66 @@ def fetch_rss() -> list[dict]:
             logger.warning("news_fetcher.rss_failed", source=source, error=str(exc))
 
     logger.info("news_fetcher.rss_done", count=len(articles))
+    return articles
+
+
+def fetch_yahoo_finance_news(tickers: list[str], max_per_ticker: int = 5) -> list[dict]:
+    """Fetch Yahoo Finance news for a list of NSE tickers (with .NS suffix).
+
+    Unlike Google News these articles are already symbol-tagged so no NER
+    is needed — the caller should attach the symbol directly.
+    """
+    try:
+        import yfinance as yf
+    except ImportError:
+        logger.error("news_fetcher.yfinance_import_error", pkg="yfinance")
+        return []
+
+    articles: list[dict] = []
+    for ticker_code in tickers:
+        try:
+            ticker = yf.Ticker(ticker_code)
+            news_items = ticker.news or []
+            for item in news_items[:max_per_ticker]:
+                content = item.get("content", {})
+                title = (content.get("title") or item.get("title") or "").strip()
+                if not title:
+                    continue
+                # providerPublishTime is a unix timestamp
+                pub_ts = (
+                    content.get("pubDate")
+                    or item.get("providerPublishTime")
+                )
+                if isinstance(pub_ts, (int, float)):
+                    published = datetime.fromtimestamp(pub_ts, tz=timezone.utc)
+                else:
+                    published = _parse_dt(pub_ts)
+                if not _is_fresh(published):
+                    continue
+                summary_raw = (
+                    content.get("summary")
+                    or content.get("description")
+                    or item.get("summary", "")
+                    or ""
+                )
+                summary = re.sub(r"<[^>]+>", "", summary_raw).strip()[:800] or None
+                link = (
+                    content.get("canonicalUrl", {}).get("url")
+                    or item.get("link")
+                )
+                articles.append({
+                    "title":     title,
+                    "summary":   summary,
+                    "url":       link,
+                    "published": published or datetime.now(tz=timezone.utc),
+                    "source":    "yahoo_finance",
+                    # Pass the raw ticker so NER mapper can use it as a direct hint
+                    "_ticker":   ticker_code,
+                })
+        except Exception as exc:
+            logger.warning("news_fetcher.yfinance_failed", ticker=ticker_code, error=str(exc))
+
+    logger.info("news_fetcher.yfinance_done", count=len(articles))
     return articles
 
 
@@ -126,6 +195,7 @@ def fetch_google_news(symbols: list[str], max_per_symbol: int = 5) -> list[dict]
                     continue
                 articles.append({
                     "title":     item.get("title", "").strip(),
+                    "summary":   (item.get("description") or "")[:800] or None,
                     "url":       item.get("url"),
                     "published": published or datetime.now(tz=timezone.utc),
                     "source":    "google_news",

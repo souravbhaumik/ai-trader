@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { BrowserRouter, Routes, Route, NavLink, Navigate } from 'react-router-dom'
 import { Toaster } from 'react-hot-toast'
-import { Cpu, LayoutDashboard, Activity, Settings, Terminal, BarChart2, Zap, LogOut, Briefcase, TrendingUp } from 'lucide-react'
+import { Cpu, LayoutDashboard, Activity, Settings, Terminal, BarChart2, Zap, LogOut, Briefcase, TrendingUp, BookOpen } from 'lucide-react'
 import { useAuthStore } from './store/authStore'
 import { apiClient } from './api/client'
 import LoginPage from './pages/LoginPage'
@@ -14,6 +14,7 @@ import AdminPage from './pages/AdminPage'
 import ScreenerPage from './pages/ScreenerPage'
 import LivePortfolioPage from './pages/LivePortfolioPage'
 import ForecastPage from './pages/ForecastPage'
+import PaperTradingPage from './pages/PaperTradingPage'
 
 // ── Auth guard ────────────────────────────────────────────────────────────────
 function RequireAuth({ children }: { children: React.ReactNode }) {
@@ -97,6 +98,9 @@ function AppLayout() {
         <NavLink to="/screener" className={({ isActive }) => `sidebar-nav-item ${isActive ? 'active' : ''}`}>
           <BarChart2 size={16} /> Market Screener
         </NavLink>
+        <NavLink to="/paper" className={({ isActive }) => `sidebar-nav-item ${isActive ? 'active' : ''}`}>
+          <BookOpen size={16} /> Paper Trading
+        </NavLink>
         <NavLink to="/live" className={({ isActive }) => `sidebar-nav-item ${isActive ? 'active' : ''}`}>
           <Briefcase size={16} /> Live Portfolio
           {tradingMode === 'live' && <span style={{ marginLeft: 'auto', width: 8, height: 8, borderRadius: '50%', background: 'var(--green)', display: 'inline-block' }} />}
@@ -121,6 +125,7 @@ function AppLayout() {
           <Route path="/opportunities" element={<OpportunitiesPage />} />
           <Route path="/screener"      element={<ScreenerPage />} />
           <Route path="/signals"       element={<SignalLogPage />} />
+          <Route path="/paper"         element={<PaperTradingPage />} />
           <Route path="/live"          element={<LivePortfolioPage />} />
           <Route path="/forecast"      element={<ForecastPage />} />
           <Route path="/admin"         element={<RequireAdmin><AdminPage /></RequireAdmin>} />

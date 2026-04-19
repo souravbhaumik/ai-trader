@@ -69,16 +69,19 @@ async def lifespan(app: FastAPI):
         logger.warning("startup.reset_interrupted_tasks_failed", error=str(exc))
 
     # Start the single shared price broadcaster for WebSocket fan-out
-    from app.api.v1.ws import price_broadcaster
+    from app.api.v1.ws import price_broadcaster, signal_broadcaster
     broadcaster_task = asyncio.create_task(price_broadcaster())
+    signal_task      = asyncio.create_task(signal_broadcaster())
 
     yield
 
     broadcaster_task.cancel()
-    try:
-        await broadcaster_task
-    except asyncio.CancelledError:
-        pass
+    signal_task.cancel()
+    for t in (broadcaster_task, signal_task):
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
     await close_redis()
     logger.info("shutdown")
 

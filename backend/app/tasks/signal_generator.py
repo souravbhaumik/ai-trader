@@ -430,6 +430,27 @@ def generate_signals(self):
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("signal_generator.discord_failed", error=str(exc))
 
+                # ── Real-time WebSocket push via Redis pub/sub (best-effort) ───
+                try:
+                    import redis as _redis_sync  # noqa: PLC0415
+                    from app.core.config import settings as _cfg  # noqa: PLC0415
+                    _r = _redis_sync.from_url(_cfg.redis_url, decode_responses=True)
+                    _r.publish("signals:new", json.dumps({
+                        "id":            str(sig_id),
+                        "symbol":        sym,
+                        "ts":            now_ts.isoformat(),
+                        "signal_type":   final_dir,
+                        "confidence":    round(final_conf, 4),
+                        "entry_price":   float(entry) if entry is not None else None,
+                        "target_price":  float(target) if target is not None else None,
+                        "stop_loss":     float(stop_loss) if stop_loss is not None else None,
+                        "model_version": model_ver,
+                        "is_active":     True,
+                    }))
+                    _r.close()
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("signal_generator.redis_publish_failed", error=str(exc))
+
                 # ── Paper trade auto-execution (Phase 5, best-effort) ──────────
                 try:
                     from app.services.paper_trade_service import auto_paper_trade
