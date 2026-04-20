@@ -1,6 +1,4 @@
 ﻿"""Prices API — market quotes, indices, historical OHLCV."""
-from __future__ import annotations
-
 from typing import Annotated, List
 
 import structlog

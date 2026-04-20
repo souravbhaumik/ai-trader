@@ -133,7 +133,7 @@ export default function DashboardPage() {
     refetchInterval: 60_000,
   })
   // Real-time signal stream overlay — latest signals pushed via WS
-  const wsSignals = useSignalStream()
+  const { signals: wsSignals } = useSignalStream()
   const { data: portfolioData } = useQuery<PortfolioSummary>({
     queryKey: ['portfolio-summary'],
     queryFn: () => apiClient.get('/portfolio/paper/summary').then(r => {
@@ -153,7 +153,7 @@ export default function DashboardPage() {
   const restSignals: Signal[] = signalsData?.signals ?? []
   const mergedMap = new Map<string, Signal>()
   for (const s of restSignals) mergedMap.set(s.id, s)
-  for (const s of wsSignals as Signal[]) mergedMap.set(s.id ?? s.symbol, s)
+  for (const s of wsSignals) mergedMap.set(s.id ?? s.symbol, s)
   const signals: Signal[] = Array.from(mergedMap.values())
     .sort((a, b) => new Date(b.ts).getTime() - new Date(a.ts).getTime())
     .slice(0, 8)

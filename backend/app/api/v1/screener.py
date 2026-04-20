@@ -1,6 +1,4 @@
 ﻿"""Screener API — paginated, filterable Nifty 500 stock screener."""
-from __future__ import annotations
-
 from typing import Annotated, Optional
 
 import structlog
