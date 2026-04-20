@@ -1,4 +1,4 @@
-"""Angel One SmartAPI broker adapter — full implementation.
+﻿"""Angel One SmartAPI broker adapter — full implementation.
 
 Uses the official `smartapi-python` SDK.
 Credentials come from the per-user broker_credentials table (decrypted by factory.py).
@@ -21,13 +21,14 @@ or authentication fails, so paper-trading users are never broken.
 from __future__ import annotations
 
 import asyncio
-import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
+import structlog
+
 from app.brokers.base import BrokerAdapter, OHLCVBar, OrderResult, Position, Quote
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 # ── Interval mapping ──────────────────────────────────────────────────────────
@@ -97,7 +98,7 @@ class AngelOneAdapter(BrokerAdapter):
                 logger.error("angel_one_auth_failed", response=data)
                 self._smart_api = None
         except Exception as e:  # noqa: BLE001
-            logger.error("angel_one_connect_error", error=str(e))
+            logger.error("angel_one_connect_error", err=str(e))
             self._smart_api = None
 
     async def disconnect(self) -> None:
@@ -116,7 +117,7 @@ class AngelOneAdapter(BrokerAdapter):
 
     async def _run_sync(self, fn, *args, **kwargs):
         """Run a synchronous SmartAPI call in a thread pool."""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, lambda: fn(*args, **kwargs))
 
     async def _market_data(self, exchange_tokens: Dict[str, List[str]], mode: str = "FULL"):
@@ -124,11 +125,11 @@ class AngelOneAdapter(BrokerAdapter):
         if not self._smart_api:
             return []
         try:
-            result = await self._run_sync(self._smart_api.marketData, mode, exchange_tokens)
+            result = await self._run_sync(self._smart_api.getMarketData, mode, exchange_tokens)
             if result and result.get("status"):
                 return result.get("data", {}).get("fetched", [])
         except Exception as e:  # noqa: BLE001
-            logger.error("angel_one_market_data_error", error=str(e))
+            logger.error("angel_one_market_data_error", err=str(e))
         return []
 
     # ── Market data ───────────────────────────────────────────────────────────
@@ -220,7 +221,7 @@ class AngelOneAdapter(BrokerAdapter):
                     )
                 return bars
         except Exception as e:  # noqa: BLE001
-            logger.error("angel_one_history_error", symbol=symbol, error=str(e))
+            logger.error("angel_one_history_error", symbol=symbol, err=str(e))
 
         return await self._yf_history(symbol, period, interval)
 
@@ -297,7 +298,7 @@ class AngelOneAdapter(BrokerAdapter):
         except RuntimeError:
             raise
         except Exception as e:  # noqa: BLE001
-            logger.error("angel_one_place_order_error", error=str(e))
+            logger.error("angel_one_place_order_error", err=str(e))
             raise RuntimeError(f"Angel One order error: {e}") from e
 
     async def cancel_order(self, broker_order_id: str, variety: str = "NORMAL") -> bool:
@@ -309,7 +310,7 @@ class AngelOneAdapter(BrokerAdapter):
             )
             return bool(result and result.get("status"))
         except Exception as e:  # noqa: BLE001
-            logger.error("angel_one_cancel_order_error", error=str(e))
+            logger.error("angel_one_cancel_order_error", err=str(e))
             return False
 
     async def get_order_status(self, broker_order_id: str) -> Optional[OrderResult]:
@@ -323,7 +324,7 @@ class AngelOneAdapter(BrokerAdapter):
                 if str(order.get("orderid", "")) == broker_order_id:
                     return self._parse_order(order)
         except Exception as e:  # noqa: BLE001
-            logger.error("angel_one_order_status_error", error=str(e))
+            logger.error("angel_one_order_status_error", err=str(e))
         return None
 
     async def get_order_by_tag(self, order_tag: str) -> Optional[OrderResult]:
@@ -343,7 +344,7 @@ class AngelOneAdapter(BrokerAdapter):
                 if str(order.get("ordertag", "")) == order_tag[:20]:
                     return self._parse_order(order)
         except Exception as e:  # noqa: BLE001
-            logger.error("angel_one_order_by_tag_error", error=str(e))
+            logger.error("angel_one_order_by_tag_error", err=str(e))
         return None
 
     async def get_positions(self) -> List[Position]:
@@ -354,7 +355,7 @@ class AngelOneAdapter(BrokerAdapter):
             if result and result.get("status"):
                 return [self._parse_position(p) for p in (result.get("data") or [])]
         except Exception as e:  # noqa: BLE001
-            logger.error("angel_one_positions_error", error=str(e))
+            logger.error("angel_one_positions_error", err=str(e))
         return []
 
     async def get_holdings(self) -> List[Position]:
@@ -365,7 +366,7 @@ class AngelOneAdapter(BrokerAdapter):
             if result and result.get("status"):
                 return [self._parse_holding(h) for h in (result.get("data") or [])]
         except Exception as e:  # noqa: BLE001
-            logger.error("angel_one_holdings_error", error=str(e))
+            logger.error("angel_one_holdings_error", err=str(e))
         return []
 
     # ── Parsing helpers ───────────────────────────────────────────────────────
@@ -390,7 +391,7 @@ class AngelOneAdapter(BrokerAdapter):
                 timestamp=datetime.now(timezone.utc).isoformat(),
             )
         except Exception as e:  # noqa: BLE001
-            logger.error("angel_one_parse_quote_error", error=str(e))
+            logger.error("angel_one_parse_quote_error", err=str(e))
             return None
 
     @staticmethod
@@ -451,25 +452,25 @@ class AngelOneAdapter(BrokerAdapter):
             symbol_token=str(h.get("symboltoken", "")),
         )
 
-    # ── yfinance fallbacks ────────────────────────────────────────────────────
+    # ── No-data fallbacks (return empty instead of using yfinance) ──────────
 
     @staticmethod
     async def _yf_quote(symbol: str) -> Optional[Quote]:
-        from app.brokers.yfinance_adapter import YFinanceAdapter
-        return await YFinanceAdapter().get_quote(symbol)
+        logger.warning("angel_one_no_data_for_quote", symbol=symbol)
+        return None
 
     @staticmethod
     async def _yf_batch(symbols: List[str]) -> List[Quote]:
-        from app.brokers.yfinance_adapter import YFinanceAdapter
-        return await YFinanceAdapter().get_quotes_batch(symbols)
+        logger.warning("angel_one_no_data_for_batch", count=len(symbols))
+        return []
 
     @staticmethod
     async def _yf_history(symbol: str, period: str, interval: str) -> List[OHLCVBar]:
-        from app.brokers.yfinance_adapter import YFinanceAdapter
-        return await YFinanceAdapter().get_history(symbol, period, interval)
+        logger.warning("angel_one_no_data_for_history", symbol=symbol)
+        return []
 
     @staticmethod
     async def _yf_indices() -> List[Quote]:
-        from app.brokers.yfinance_adapter import YFinanceAdapter
-        return await YFinanceAdapter().get_indices()
+        logger.warning("angel_one_no_data_for_indices")
+        return []
 

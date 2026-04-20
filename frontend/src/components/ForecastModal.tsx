@@ -30,6 +30,18 @@ export function Chip({ label, value, color, muted }: { label: string; value: str
 }
 
 // ── Chart ─────────────────────────────────────────────────────────────────────
+// Returns YYYY-MM-DD string for a date offset by `tradingDays` business days from `from`
+function addTradingDays(from: Date, tradingDays: number): string {
+  const d = new Date(from)
+  let added = 0
+  while (added < tradingDays) {
+    d.setDate(d.getDate() + 1)
+    const dow = d.getDay()
+    if (dow !== 0 && dow !== 6) added++ // skip Sat/Sun
+  }
+  return d.toISOString().slice(0, 10) // 'YYYY-MM-DD'
+}
+
 export function ForecastChart({ data, basePrice }: { data: number[]; basePrice: number }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef     = useRef<IChartApi | null>(null)
@@ -43,15 +55,22 @@ export function ForecastChart({ data, basePrice }: { data: number[]; basePrice: 
       width: containerRef.current.clientWidth, height: 240,
       layout: { background: { color: 'transparent' }, textColor: '#94a3b8' },
       grid: { vertLines: { color: 'rgba(255,255,255,0.05)' }, horzLines: { color: 'rgba(255,255,255,0.05)' } },
-      timeScale: { borderColor: 'rgba(255,255,255,0.1)', tickMarkFormatter: (time: number) => `D+${time}` },
+      timeScale: { borderColor: 'rgba(255,255,255,0.1)', timeVisible: false },
       rightPriceScale: { borderColor: 'rgba(255,255,255,0.1)' },
     })
     chartRef.current = chart
     const series = chart.addSeries(LineSeries, { color: '#3b82f6', lineWidth: 2, crosshairMarkerVisible: true, priceLineVisible: true })
     seriesRef.current = series
+
+    // Use real calendar dates so lightweight-charts tooltips show correct dates.
+    // D+0 = today (base price), D+1…D+N = next N trading days.
+    const today = new Date()
     const lineData: LineData[] = [
-      { time: 0 as unknown as LineData['time'], value: basePrice },
-      ...data.map((price, i) => ({ time: (i + 1) as unknown as LineData['time'], value: price })),
+      { time: today.toISOString().slice(0, 10) as LineData['time'], value: basePrice },
+      ...data.map((price, i) => ({
+        time: addTradingDays(today, i + 1) as LineData['time'],
+        value: price,
+      })),
     ]
     series.setData(lineData)
     chart.timeScale().fitContent()

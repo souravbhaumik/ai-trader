@@ -1,4 +1,4 @@
-"""Pydantic schemas for paper trading endpoints."""
+﻿"""Pydantic schemas for paper trading endpoints."""
 from __future__ import annotations
 
 import uuid

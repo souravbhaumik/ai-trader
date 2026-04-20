@@ -1,4 +1,4 @@
-"""Logo endpoint — serves pre-downloaded company logos.
+﻿"""Logo endpoint — serves pre-downloaded company logos.
 
 Flow:
   1. Look up logo_path in stock_universe (set by download_logos.py script).

@@ -1,4 +1,4 @@
-"""LSTM Autoencoder inference service — Phase 5.
+﻿"""LSTM Autoencoder inference service — Phase 5.
 
 Loads a pre-trained LSTM autoencoder artifact (trained on Colab, downloaded
 from Google Drive) and computes per-symbol anomaly scores.
@@ -102,7 +102,12 @@ def _load_model() -> bool:
         return False
     try:
         import torch  # noqa: PLC0415
-        payload = torch.load(_MODEL_PATH, map_location="cpu", weights_only=False)
+        try:
+            payload = torch.load(_MODEL_PATH, map_location="cpu", weights_only=True)
+        except Exception:
+            logger.warning("lstm_service.unsafe_load",
+                           msg="Artifact requires weights_only=False; re-save with safe format")
+            payload = torch.load(_MODEL_PATH, map_location="cpu", weights_only=False)  # noqa: S301
         model   = _build_model(payload["config"])
         model.load_state_dict(payload["state_dict"])
         model.eval()
@@ -117,7 +122,7 @@ def _load_model() -> bool:
                     version=_state.version, threshold=round(_state.threshold, 6))
         return True
     except Exception as exc:
-        logger.error("lstm_service.load_failed", error=str(exc))
+        logger.error("lstm_service.load_failed", err=str(exc))
         return False
 
 
@@ -241,7 +246,7 @@ def compute_anomaly_score(
             "version":    _state.version,
         }
     except Exception as exc:
-        logger.warning("lstm_service.score_failed", symbol=symbol, error=str(exc))
+        logger.warning("lstm_service.score_failed", symbol=symbol, err=str(exc))
         return None
 
 

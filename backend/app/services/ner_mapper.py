@@ -1,4 +1,4 @@
-"""NER + fuzzy symbol mapper — Phase 4.
+﻿"""NER + fuzzy symbol mapper — Phase 4.
 
 Extracts organisation names from news headlines using spaCy NER, then
 fuzzy-matches them against the ``stock_universe`` company names to produce
@@ -186,7 +186,7 @@ def _load_universe() -> None:
 
         logger.info("ner_mapper.universe_loaded", count=len(_UNIVERSE))
     except Exception as exc:
-        logger.error("ner_mapper.universe_load_failed", error=str(exc))
+        logger.error("ner_mapper.universe_load_failed", err=str(exc))
 
 
 def _ensure_universe() -> None:
@@ -209,7 +209,7 @@ def _get_nlp():
                     _NLP = spacy.load("en_core_web_sm", disable=["parser", "tagger", "lemmatizer"])
                     logger.info("ner_mapper.spacy_loaded")
                 except Exception as exc:
-                    logger.error("ner_mapper.spacy_load_failed", error=str(exc))
+                    logger.error("ner_mapper.spacy_load_failed", err=str(exc))
                     _NLP = False   # sentinel — don't retry on every call
     return _NLP if _NLP else None
 
@@ -244,10 +244,7 @@ def map_headline_to_symbols(headline: str, query_hint: Optional[str] = None) -> 
         doc = nlp(headline)
         candidates += [ent.text for ent in doc.ents if ent.label_ == "ORG"]
 
-    # 2. Fallback: whole headline
-    candidates.append(headline)
-
-    # 3. Query hint
+    # 2. Query hint
     if query_hint:
         candidates.append(query_hint)
 

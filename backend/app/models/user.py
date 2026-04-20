@@ -1,4 +1,4 @@
-﻿"""User SQLModel — maps to the `users` table managed by Alembic."""
+﻿"""User SQLModel � maps to the `users` table managed by Alembic."""
 from __future__ import annotations
 
 import uuid
@@ -25,7 +25,7 @@ class User(SQLModel, table=True):
     is_email_verified: bool = Field(default=False)
     is_live_trading_enabled: bool = Field(default=False)
 
-    # TOTP — secret stored Fernet-encrypted; null if not configured
+    # TOTP � secret stored Fernet-encrypted; null if not configured
     totp_secret: Optional[str] = Field(default=None, max_length=255)
     is_totp_configured: bool = Field(default=False)
 

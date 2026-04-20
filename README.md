@@ -1,274 +1,379 @@
-# AI Trader — Phase 1
+# AI Trader
 
-Invite-only Indian stock market AI trading platform.
-Phase 1: Authentication, user management, and foundational infrastructure.
+> **Algorithmic Trading Platform for Indian Equity Markets**
+
+AI Trader is a full-stack automated trading system for NSE/BSE markets. It combines technical analysis, machine learning signal generation, news sentiment analysis, and multi-broker integration to provide both paper and live trading capabilities.
+
+![Python](https://img.shields.io/badge/Python-3.11+-blue)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-green)
+![React](https://img.shields.io/badge/React-18+-61DAFB)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-336791)
+![License](https://img.shields.io/badge/License-MIT-yellow)
+
+---
+
+## Features
+
+### 📊 Market Data
+
+- **Real-time quotes** via Angel One and Upstox APIs
+- **Historical OHLCV** data with TimescaleDB compression
+- **Intraday 15-min candles** in `ohlcv_intraday` (5-day rolling, Angel One → Upstox hybrid)
+- **NSE Bhavcopy** daily ingest for EOD data
+- **Stock screener** with pagination, search, and signal filters
+
+### 🤖 AI-Powered Signals
+
+- **LightGBM classifier** for BUY/SELL signal generation
+- **Technical indicators**: RSI, MACD, Bollinger Bands, ATR, OBV, ADX
+- **Intraday signals** at 9:30 AM, 11:00 AM, and 1:00 PM using live 15-min candles
+- **LSTM autoencoder** for market anomaly detection
+- **TFT Transformer** for 5-day price forecasting
+- **FinBERT** sentiment analysis on financial news
+
+### 📰 News & Sentiment
+
+- Multi-source aggregation: Google News, Yahoo Finance, RSS feeds
+- spaCy NER for news → symbol mapping
+- Real-time sentiment scoring and caching
+- On-demand live analysis endpoint
+
+### 💼 Trading
+
+- **Paper trading** with ₹10,00,000 virtual capital and 0.03% brokerage
+- **Live trading** via Angel One SmartAPI and Upstox REST API
+- **Risk management**: Daily loss limits, position sizing caps
+- **Order webhooks** for real-time fill notifications
+
+### 🔒 Security
+
+- JWT authentication with httpOnly refresh tokens
+- TOTP two-factor authentication (required for admins)
+- Fernet encryption for broker credentials
+- Rate limiting and brute-force protection
+- Email OTP gate for live trading enablement
+
+### 📱 Notifications
+
+- Discord webhook integration for signals and trades
+- Expo push notifications for mobile app
+- WebSocket streaming for live prices and signals
+
+### 🛠 Operations
+
+- Admin dashboard for user management
+- Pipeline monitoring with task status tracking
+- MLflow experiment tracking
+- Flower-based Celery monitoring
+
+---
+
+## Tech Stack
+
+| Layer              | Technologies                                      |
+| ------------------ | ------------------------------------------------- |
+| **Backend**        | Python 3.11, FastAPI, SQLModel, Celery, Redis     |
+| **Database**       | PostgreSQL 16, TimescaleDB 2                      |
+| **ML/AI**          | LightGBM, PyTorch (LSTM, TFT), FinBERT, spaCy     |
+| **Frontend**       | React 18, TypeScript, Vite, Zustand, Recharts     |
+| **Infrastructure** | Docker Compose, Cloudflare Tunnel, MLflow, Flower |
+
+---
 
 ## Quick Start
 
-### 1. Generate secrets and copy `.env`
+### Prerequisites
+
+- Docker & Docker Compose
+- Git
+
+### 1. Clone & Configure
 
 ```bash
-# Copy template
+git clone https://github.com/yourusername/ai-trader.git
+cd ai-trader
+
+# Copy example environment file
 cp .env.example .env
 
-# Generate secrets (run each command, paste output into .env)
-python -c "import secrets; print(secrets.token_hex(32))"          # JWT_SECRET_KEY
-python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"  # FERNET_KEY
-python -c "import secrets; print(secrets.token_hex(32))"          # INVITE_SIGNING_KEY
-
-# Set strong passwords for DB_PASSWORD, REDIS_PASSWORD
-# Set ADMIN_EMAIL, ADMIN_PASSWORD, ADMIN_FULL_NAME
+# Edit .env with your settings (database passwords, JWT secret, etc.)
+nano .env
 ```
 
-### 2. Start services
+### 2. Generate Security Keys
+
+```bash
+# JWT Secret (64-character hex)
+python -c "import secrets; print(secrets.token_hex(32))"
+
+# Fernet Key
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+
+# Invite Signing Key (32-byte hex)
+python -c "import secrets; print(secrets.token_hex(16))"
+```
+
+### 3. Start Services
 
 ```bash
 docker compose up -d
 ```
 
-Postgres runs on **5433**, Redis on **6379**, backend on **8000**, frontend on **3000**.
+This starts:
 
-### 3. Run migrations
+- **PostgreSQL + TimescaleDB** on port 5433
+- **Redis** on port 6379
+- **FastAPI Backend** on port 8000
+- **Vite Frontend** on port 3000
+- **Celery Worker + Beat** (background tasks)
+- **Flower** on port 5555
+- **MLflow** on port 5001
 
-Migrations run automatically on backend startup via `alembic upgrade head`.
-To run manually:
-
-```bash
-docker compose exec backend alembic upgrade head
-```
-
-### 4. Seed the first admin user
+### 4. Create Admin User
 
 ```bash
 docker compose exec backend python scripts/seed_admin_user.py
 ```
 
-### 5. Invite your first trader
+### 5. Access the Application
 
-Hit the API (or use Swagger at `http://localhost:8000/docs` in development):
-
-```bash
-# Login as admin
-curl -s -X POST http://localhost:8000/api/v1/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"email":"admin@example.com","password":"YOUR_ADMIN_PASSWORD"}' | jq .
-
-# Invite a user (use the access_token from login)
-curl -s -X POST http://localhost:8000/api/v1/admin/users/invite \
-  -H "Authorization: Bearer ACCESS_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"email":"trader@example.com"}' | jq .
-```
-
-The response includes a `registration_url` — share it with the user. They visit
-`http://localhost:3000/register?token=...` to create their account.
+| Service     | URL                        |
+| ----------- | -------------------------- |
+| Frontend    | http://localhost:3000      |
+| Backend API | http://localhost:8000      |
+| API Docs    | http://localhost:8000/docs |
+| Flower      | http://localhost:5555      |
+| MLflow      | http://localhost:5001      |
 
 ---
 
-## Re-imaging & Deployment Commands
+## Project Structure
 
-### Rebuild a single service (e.g. after changing backend code or `requirements.txt`)
-
-```bash
-docker compose build backend
-docker compose up -d backend
 ```
-
-### Rebuild all custom images and restart everything
-
-```bash
-docker compose build
-docker compose up -d
-```
-
-### Full nuclear re-image (wipe containers + images, keep data volumes)
-
-```bash
-# Stop and remove all containers + orphaned containers
-docker compose down --remove-orphans
-
-# Rebuild every image from scratch (no layer cache)
-docker compose build --no-cache
-
-# Bring everything back up
-docker compose up -d
-```
-
-### Full factory reset (wipe ALL data — DB, Redis, model artifacts, HuggingFace cache)
-
-> **Destructive — cannot be undone.** Only do this to start completely fresh.
-
-```bash
-docker compose down --volumes --remove-orphans
-docker compose build --no-cache
-docker compose up -d
-```
-
-### Apply new database migrations only
-
-```bash
-docker compose exec backend alembic upgrade head
-```
-
-### Re-seed the admin user (after a factory reset)
-
-```bash
-docker compose exec backend python scripts/seed_admin_user.py
-```
-
-### Restart individual services without rebuilding
-
-```bash
-# Restart backend + celery worker (e.g. after editing Python source)
-docker compose restart backend celery-worker
-
-# Restart everything
-docker compose restart
-```
-
-### Tail logs for a service
-
-```bash
-docker compose logs -f backend
-docker compose logs -f celery-worker
-docker compose logs -f celery-beat
-```
-
-### Check container health
-
-```bash
-docker compose ps
-```
-
-### Trigger a manual model training run
-
-```bash
-docker compose exec celery-worker sh -c \
-  "PYTHONPATH=/app celery -A app.tasks.celery_app call app.tasks.ml_training.train_model"
-```
-
-### Trigger a manual Bhavcopy ingest
-
-```bash
-docker compose exec celery-worker sh -c \
-  "PYTHONPATH=/app celery -A app.tasks.celery_app call app.tasks.bhavcopy.ingest_bhavcopy"
+ai-trader/
+├── backend/                 # FastAPI application
+│   ├── app/
+│   │   ├── api/v1/         # REST endpoints
+│   │   ├── brokers/        # Angel One, Upstox, yfinance
+│   │   ├── core/           # Config, database, security
+│   │   ├── lib/            # IP rotator, utilities
+│   │   ├── models/         # SQLModel ORM models
+│   │   ├── services/       # Business logic
+│   │   └── tasks/          # Celery background tasks
+│   ├── alembic/            # Database migrations
+│   └── requirements.txt
+├── frontend/               # React application
+│   ├── src/
+│   │   ├── pages/          # Route components
+│   │   ├── components/     # Reusable UI
+│   │   └── store/          # Zustand state
+│   └── package.json
+├── colab/                  # ML training notebooks
+├── docker-compose.yml      # Service orchestration
+└── .env.example            # Environment template
 ```
 
 ---
 
-## Architecture
+## Configuration
 
-See [DESIGN.md](DESIGN.md), [DATABASE.md](DATABASE.md), and [API.md](API.md).
+### Required Environment Variables
 
-## Directory Structure
+```bash
+# Database
+DB_USER=aitrader
+DB_PASSWORD=<strong_password>
+DB_NAME=aitrader
 
-```
-backend/               FastAPI backend
-  app/
-    core/              Config, security, DB, Redis, logging
-    models/            SQLModel ORM models
-    schemas/           Pydantic request/response schemas
-    api/v1/            Route handlers
-    services/          Business logic
-    middleware/        Request logging
-  alembic/             Database migrations
-  scripts/             Admin utilities
-db_init/               TimescaleDB Docker init SQL
-  01_init_timescaledb.sql   Hypertables, indexes, triggers
-  02_pipeline_task_status.sql  Pipeline task status table + seed rows
-frontend/              Vite + React + TypeScript
-docker-compose.yml     Services: postgres, redis, backend, frontend
-.env.example           Environment variable template
+# Redis
+REDIS_PASSWORD=<strong_password>
+
+# Security
+JWT_SECRET_KEY=<64_char_hex>
+FERNET_KEY=<base64_fernet_key>
+INVITE_SIGNING_KEY=<32_byte_hex>
 ```
 
-## Phase 1 Features
+### Optional: Broker Integration
 
-- [x] JWT authentication (15-min access token, 7-day httpOnly refresh cookie)
-- [x] Invite-only registration (admin creates single-use 24h invite links)
-- [x] Bcrypt password hashing (cost 12)
-- [x] TOTP support for admin (optional for Phase 1; full setup in Phase 2)
-- [x] Redis JWT blocklist for logout
-- [x] Structlog JSON logging with sensitive data redaction
-- [x] Alembic migrations
-- [x] TimescaleDB foundation
-- [x] React frontend with auth guards, login/register pages, Zustand auth store
-- [x] Axios auto-refresh interceptor
+```bash
+# Angel One
+ANGEL_API_KEY=your_api_key
+ANGEL_CLIENT_ID=your_client_id
+ANGEL_MPIN=your_mpin
+ANGEL_TOTP_SECRET=your_totp_base32
 
-## Phase 2 Features (Complete)
+# Upstox
+UPSTOX_API_KEY=your_api_key
+UPSTOX_API_SECRET=your_secret
+```
 
-- [x] Market data ingestion (TimescaleDB hypertables, Celery EOD ingest)
-- [x] WebSocket price streaming with Redis fan-out
-- [x] Signal generation pipeline
-- [x] Celery workers + Redis task queue
+### Optional: Notifications
 
-## Phase 3 Features (Complete)
+```bash
+# Discord
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
 
-- [x] DB-backed pipeline task status (`pipeline_task_status` PostgreSQL table — durable across worker restarts)
-- [x] Admin pipeline panel with per-task live log viewer (TaskLogModal, auto-polling)
-- [x] Startup reset: tasks interrupted by a worker crash are shown as `unknown` on next backend start
-- [x] DB browser with live row counts for all tables
-- [x] `GET /admin/pipeline/{task_name}/logs` API endpoint (reads ephemeral per-task log lines from Redis)
-- [x] TanStack Query on the frontend (stale-while-revalidate)
-- [x] Alembic migration init container (db-migrate)
-- [x] Circuit-breaker pattern on broker API calls
+# Email (SMTP)
+SMTP_HOST=smtp.gmail.com
+SMTP_USER=your@email.com
+SMTP_PASSWORD=app_password
+```
 
-## Phase 4 Features — News Sentiment Pipeline (Complete)
+See [GETTING_STARTED.md](GETTING_STARTED.md) for complete configuration guide.
 
-- [x] RSS feed fetcher (ET Markets, Moneycontrol, Business Standard, Livemint, NSE, BSE corporate)
-- [x] Google News fetcher (gnews, top 50 symbols by market cap)
-- [x] NER entity extraction (spaCy `en_core_web_sm`) + fuzzy symbol mapping (rapidfuzz)
-- [x] FinBERT batch inference (ProsusAI/finbert, CPU default / `SENTIMENT_DEVICE=cuda` for GPU)
-- [x] `news_sentiment` TimescaleDB hypertable (1-day chunks, dedup by URL+symbol)
-- [x] Celery Beat task every 15 min Mon–Fri 9:00 AM – 3:45 PM IST
-- [x] Redis rolling 24-h weighted sentiment cache per symbol (`sentiment:<SYM>`, 2-h TTL)
-- [x] `GET /api/v1/news/sentiment?symbol=X` — aggregated score from cache (DB fallback)
-- [x] `GET /api/v1/news/feed?symbol=X&limit=20` — recent headlines with per-article scores
+---
 
-## Phase 3 Features — AI/ML Pipeline (Complete)
+## API Overview
 
-- [x] Feature engineering: RSI(14), MACD histogram, Bollinger %B, ATR%, OBV trend, ADX(14), volume ratio, SMA20/50 deviation, Phase 4 sentiment score
-- [x] LightGBM binary classifier — trained on sliding-window OHLCV features
-- [x] `ml_models` table — tracks model versions, artifact paths, metrics, active flag
-- [x] `model_predictions` TimescaleDB hypertable — per-symbol ML output audit trail
-- [x] Signal generator upgraded: blends technical (40%) + ML probability (45%) + sentiment (15%)
-- [x] Graceful fallback to technical-only when no active model exists
-- [x] MLflow integration — optional; set `MLFLOW_TRACKING_URI` env var to enable
-- [x] Admin endpoints: `POST /train-model`, `GET /models`, `POST /models/{id}/promote`, `POST /models/{id}/rollback`
-- [x] In-process ML model loader with 5-min auto-reload on version change
+### Authentication
 
-## Phase 5 Features — Paper Trading + Execution (Complete)
+```
+POST /api/v1/auth/login          # Login → access_token + refresh cookie
+POST /api/v1/auth/refresh        # Refresh access token
+POST /api/v1/auth/logout         # Logout + invalidate tokens
+POST /api/v1/auth/register       # Register with invite token
+```
 
-- [x] `paper_trades` TimescaleDB table — per-user simulated trade ledger
-- [x] Paper balance management in `user_settings` — deducted on open, restored + P&L on close
-- [x] Auto-execution: when signals fire, paper trades placed for all `trading_mode='paper'` users (enable via `PAPER_AUTO_TRADE=true`)
-- [x] `GET /api/v1/portfolio/paper/summary` — cash balance, realized P&L, win rate, open positions
-- [x] `GET /api/v1/portfolio/paper/positions` — open paper trades
-- [x] `GET /api/v1/portfolio/paper/history?limit=N` — closed trade history
-- [x] `POST /api/v1/portfolio/paper/orders` — manually place a paper trade
-- [x] `POST /api/v1/portfolio/paper/orders/{id}/close` — close position (auto-fetches live price via yfinance if not provided)
+### Market Data
 
-## Phase 6 Features — Live Execution + Advanced ML (Complete)
+```
+GET  /api/v1/prices/indices      # Nifty 50, Sensex, etc.
+GET  /api/v1/prices/{symbol}/quote
+GET  /api/v1/prices/{symbol}/history
+GET  /api/v1/screener            # Paginated stock list
+```
 
-- [x] Angel One SmartAPI live order routing (`backend/app/brokers/angel_one.py`)
-- [x] Fernet-encrypted broker credentials stored per user (`broker_credentials` table)
-- [x] Idempotent order placement — broker `ordertag` (UUID) prevents double-orders on network timeout
-- [x] Timeout recovery: queries Angel One `getOrderBook` by tag before failing, marks row `TIMEOUT` if genuinely lost
-- [x] Broker order-status webhook `POST /api/v1/webhooks/order-update` (Angel One postback)
-- [x] Webhook race-condition safety — Celery retry (`countdown=3`) if postback arrives before INSERT commits
-- [x] LSTM autoencoder for OHLCV anomaly detection (`backend/app/services/lstm_service.py`)
-- [x] TFT (Temporal Fusion Transformer) multi-step price forecasting (`backend/app/services/tft_service.py`)
-- [x] Google Drive model download at startup (`LSTM_GDRIVE_ID`, `TFT_GDRIVE_ID` in `.env`)
-- [x] Celery `worker_ready` hook — eagerly loads LSTM + TFT models on worker boot (no cold-load spike)
-- [x] Discord webhook alerts for order fills (`DISCORD_WEBHOOK_URL` in `.env`)
-- [ ] Upstox live execution (deferred — OAuth redirect flow requires a public redirect URI)
+### Signals & Trading
 
-## Coming in Phase 3 (AI/ML)
+```
+GET  /api/v1/signals             # AI-generated signals
+POST /api/v1/portfolio/paper/orders    # Paper trade
+POST /api/v1/portfolio/live/orders     # Live order (requires OTP enablement)
+```
 
-- ~~LightGBM / XGBoost signal models trained on technical features~~ ✅ Done (Phase 3)
-- ~~LSTM autoencoder for anomaly detection~~ → Phase 5 (GPU recommended)
-- ~~TFT (Temporal Fusion Transformer) price forecasting~~ → Phase 5 (GPU recommended)
-- ~~Model versioning with MLflow~~ ✅ Done (Phase 3)
-- ~~Trade execution (paper + live via Angel One / Upstox)~~ → Paper ✅ Done (Phase 5) · Live → Phase 5
-- ~~TOTP setup endpoint for admin~~ ✅ Done (Phase 1)
-- ~~Discord webhook alerts~~ ✅ Done (Phase 3)
+### WebSocket
 
+```
+ws://host/api/v1/ws/prices?token=<jwt>&symbols=RELIANCE.NS,TCS.NS
+ws://host/api/v1/ws/signals?token=<jwt>
+```
+
+Full API documentation: http://localhost:8000/docs
+
+---
+
+## Scheduled Tasks
+
+| Task              | Schedule                   | Purpose                 |
+| ----------------- | -------------------------- | ----------------------- |
+| Bhavcopy Ingest   | 7:30 PM IST Mon-Fri        | NSE EOD data            |
+| Signal Generation | 4:45 PM IST Mon-Fri        | ML signal generation    |
+| News Sentiment    | Every 15 min, 9 AM-3:45 PM | News scoring            |
+| Model Training    | Saturday 2:00 AM           | Weekly LightGBM retrain |
+| Broker Reconnect  | 8:00 AM IST Mon-Fri        | Session refresh         |
+
+Monitor at http://localhost:5555 (Flower)
+
+---
+
+## Documentation
+
+| Document                                 | Description                              |
+| ---------------------------------------- | ---------------------------------------- |
+| [DESIGN.md](DESIGN.md)                   | System architecture and technical design |
+| [GETTING_STARTED.md](GETTING_STARTED.md) | Detailed setup and configuration guide   |
+| [API.md](API.md)                         | Complete API reference                   |
+| [DATABASE.md](DATABASE.md)               | Database schema documentation            |
+
+---
+
+## Development
+
+### Backend Development
+
+```bash
+# Install dependencies
+cd backend
+pip install -r requirements.txt
+
+# Run migrations
+alembic upgrade head
+
+# Start dev server
+uvicorn app.main:app --reload --port 8000
+
+# Run Celery worker
+celery -A app.tasks.celery_app worker --loglevel=info
+```
+
+### Frontend Development
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+### Running Tests
+
+```bash
+# Backend
+cd backend
+pytest
+
+# Frontend
+cd frontend
+npm test
+```
+
+---
+
+## Production Deployment
+
+### Cloudflare Tunnel Setup
+
+For stable webhook URLs (required for broker postbacks):
+
+```bash
+# Install cloudflared
+# Configure tunnel to proxy to backend:8000
+cloudflared tunnel create ai-trader
+cloudflared tunnel route dns ai-trader your-domain.com
+```
+
+### Environment Adjustments
+
+```bash
+ENVIRONMENT=production
+ALLOWED_ORIGINS=https://your-domain.com
+FRONTEND_URL=https://your-domain.com
+```
+
+### Docker Production
+
+```bash
+docker compose -f docker-compose.prod.yml up -d
+```
+
+---
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit changes (`git commit -m 'Add amazing feature'`)
+4. Push to branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+---
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+---
+
+## Disclaimer
+
+This software is for educational purposes only. Algorithmic trading involves significant financial risk. The authors are not responsible for any financial losses incurred through the use of this software. Always test thoroughly with paper trading before using real capital.

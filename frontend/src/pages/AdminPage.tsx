@@ -62,13 +62,14 @@ interface TaskLogEntry {
 
 // ── Simple one-shot trigger button ───────────────────────────────────────────
 function TriggerBtn({
-  label, endpoint, body, icon, disabled,
+  label, endpoint, body, icon, disabled, onSuccess,
 }: {
   label: string
   endpoint: string
   body?: Record<string, unknown>
   icon?: React.ReactNode
   disabled?: boolean
+  onSuccess?: () => void
 }) {
   const [busy, setBusy] = useState(false)
   const run = async () => {
@@ -76,6 +77,7 @@ function TriggerBtn({
     try {
       const { data } = await apiClient.post<TaskResult>(endpoint, body ?? {})
       toast.success(data.message)
+      onSuccess?.()
     } catch (e: unknown) {
       const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? 'Failed.'
       toast.error(msg)
@@ -262,11 +264,8 @@ function PipelinePanel() {
   useEffect(() => {
     refresh()
 
-    // Auto-poll every 3s while any task is running
-    const autoPoll = setInterval(async () => {
-      const data = await refresh()
-      if (data && !data.some(e => e.status === 'running')) clearInterval(autoPoll)
-    }, 3000)
+    // Continuously poll every 3s while the page is mounted
+    const autoPoll = setInterval(() => { refresh() }, 3000)
 
     return () => { clearInterval(autoPoll) }
   }, [])
@@ -314,13 +313,13 @@ function PipelinePanel() {
             Nifty 500 only
           </label>
           <TriggerBtn label="Populate" endpoint="/admin/pipeline/populate-universe"
-            body={{ nifty500_only: nifty500Only }} icon={<Globe size={12}/>}/>
+            body={{ nifty500_only: nifty500Only }} icon={<Globe size={12}/>} onSuccess={refresh}/>
         </div>
       ),
     },
     {
-      n: 2, label: 'Broker Backfill (Angel One)', task: 'broker_backfill',
-      desc: 'Historical OHLCV via Angel One SmartAPI. Run once after first setup.',
+      n: 2, label: 'NSE Bhavcopy Backfill', task: 'backfill',
+      desc: 'Historical OHLCV via NSE Bhavcopy (one request per trading day covers all symbols). Run once after first setup.',
       actions: (
         <div style={{ display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
           <select value={brokerPeriod} onChange={e => setBrokerPeriod(e.target.value as '1y'|'2y'|'5y')}
@@ -329,8 +328,8 @@ function PipelinePanel() {
             <option value="2y">2 Years</option>
             <option value="5y">5 Years</option>
           </select>
-          <TriggerBtn label="Run Backfill" endpoint="/admin/pipeline/broker-backfill"
-            body={{ period: brokerPeriod }} icon={<Layers size={12}/>}/>
+          <TriggerBtn label="Run Backfill" endpoint="/admin/pipeline/backfill"
+            body={{ period: brokerPeriod }} icon={<Layers size={12}/>} onSuccess={refresh}/>
         </div>
       ),
     },
@@ -342,12 +341,17 @@ function PipelinePanel() {
           <input type="date" value={dateVal} onChange={e => setDateVal(e.target.value)}
             style={{ background:'var(--bg)', border:'1px solid var(--border)', borderRadius:6, padding:'4px 8px', color:'var(--text)', fontSize:11 }}/>
           <TriggerBtn label={dateVal ? `Run ${dateVal}` : 'Run Today'}
-            endpoint="/admin/pipeline/bhavcopy" body={{ trade_date: dateVal || null }} icon={<RefreshCw size={12}/>}/>
+            endpoint="/admin/pipeline/bhavcopy" body={{ trade_date: dateVal || null }} icon={<RefreshCw size={12}/>} onSuccess={refresh}/>
         </div>
       ),
     },
     {
-      n: 4, label: 'Train ML Model', task: 'ml_training',
+      n: 4, label: 'Feature Engineering', task: 'feature_engineering',
+      desc: 'Validate technical indicators (RSI, MACD, Bollinger, ATR, OBV, ADX, SMA) across all active symbols. Run after backfill to confirm training readiness.',
+      actions: <TriggerBtn label="Run Check" endpoint="/admin/pipeline/feature-engineering" icon={<Play size={12}/>} onSuccess={refresh}/>,
+    },
+    {
+      n: 5, label: 'Train ML Model', task: 'ml_training',
       desc: 'Train LightGBM on OHLCV features. Needs ≥60 days of data per symbol.',
       actions: (
         <button className="btn btn-outline" onClick={trainModel} disabled={mlLoading}
@@ -358,10 +362,10 @@ function PipelinePanel() {
       ),
     },
     {
-      n: 5, label: 'Promote Model', task: 'ml_training',
+      n: 6, label: 'Promote Model', task: 'ml_training',
       desc: 'Activate a trained model. Signals will use 45% ML blend immediately.',
       actions: models.length === 0 ? (
-        <span style={{ fontSize:11, color:'var(--text-muted)' }}>No models yet — run Step 4 first.</span>
+        <span style={{ fontSize:11, color:'var(--text-muted)' }}>No models yet — run Step 5 first.</span>
       ) : (
         <div style={{ display:'flex', flexDirection:'column', gap:6, width:'100%' }}>
           {models.slice(0, 3).map(m => (
@@ -391,19 +395,19 @@ function PipelinePanel() {
       ),
     },
     {
-      n: 6, label: 'Generate Signals', task: 'signal_generator',
+      n: 7, label: 'Generate Signals', task: 'signal_generator',
       desc: 'Auto-scheduled Mon–Fri 16:45 IST. Tech 40% + ML 45% + Sentiment 15%.',
-      actions: <TriggerBtn label="Run Now" endpoint="/admin/pipeline/generate-signals" icon={<Play size={12}/>}/>,
+      actions: <TriggerBtn label="Run Now" endpoint="/admin/pipeline/generate-signals" icon={<Play size={12}/>} onSuccess={refresh}/>,
     },
     {
-      n: 7, label: 'EOD Ingest', task: 'eod_ingest',
+      n: 8, label: 'EOD Ingest', task: 'eod_ingest',
       desc: 'Auto-scheduled Mon–Fri 16:30 IST. Bhavcopy runs separately at 19:30 IST.',
-      actions: <TriggerBtn label="Run Now" endpoint="/admin/pipeline/eod-ingest" icon={<RefreshCw size={12}/>}/>,
+      actions: <TriggerBtn label="Run Now" endpoint="/admin/pipeline/eod-ingest" icon={<RefreshCw size={12}/>} onSuccess={refresh}/>,
     },
     {
-      n: 8, label: 'Download Logos', task: 'logo_download',
+      n: 9, label: 'Download Logos', task: 'logo_download',
       desc: 'Fetch ticker logos from logo.dev and cache locally. Incremental — new symbols get logos, existing ones are skipped.',
-      actions: <TriggerBtn label="Run Now" endpoint="/admin/pipeline/download-logos" icon={<RefreshCw size={12}/>}/>,
+      actions: <TriggerBtn label="Run Now" endpoint="/admin/pipeline/download-logos" icon={<RefreshCw size={12}/>} onSuccess={refresh}/>,
     },
   ]
 
@@ -465,9 +469,10 @@ function PipelinePanel() {
                   <Terminal size={11}/> View Logs
                 </button>
               </div>
-              {entry?.ts && (
-                <div style={{ fontSize:10, color:'var(--text-muted)', whiteSpace:'nowrap', paddingTop:6 }}>
-                  {new Date(entry.ts).toLocaleString('en-IN', { dateStyle:'short', timeStyle:'short' })}
+              {(entry?.finished_at || entry?.started_at) && (
+                <div style={{ fontSize:10, color:'var(--text-muted)', whiteSpace:'nowrap', paddingTop:6, textAlign:'right' }}>
+                  <div style={{ opacity:0.6 }}>{entry.finished_at ? 'Last run' : 'Started'}</div>
+                  {new Date((entry.finished_at ?? entry.started_at)!).toLocaleString('en-IN', { dateStyle:'short', timeStyle:'short' })}
                 </div>
               )}
             </div>
@@ -576,7 +581,7 @@ function DataTable({ columns, rows }: { columns: string[]; rows: Record<string, 
 }
 
 // ── DB Browser modal ──────────────────────────────────────────────────────────
-interface DbTable { table_name: string; size: string; row_estimate: number | null }
+interface DbTable { table_name: string }
 interface QueryResult { columns: string[]; rows: Record<string, unknown>[]; count?: number }
 
 function DBBrowserModal({ onClose }: { onClose: () => void }) {
@@ -645,12 +650,7 @@ function DBBrowserModal({ onClose }: { onClose: () => void }) {
               }}
             >
               <Table2 size={12} style={{ color:'var(--text-muted)', flexShrink:0 }}/>
-              <div style={{ flex:1, minWidth:0 }}>
-                <div style={{ overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{t.table_name}</div>
-                <div style={{ fontSize:10, color:'var(--text-muted)' }}>
-                  ~{(t.row_estimate ?? 0).toLocaleString()} rows · {t.size}
-                </div>
-              </div>
+              <div style={{ overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', flex:1 }}>{t.table_name}</div>
               <ChevronRight size={11} style={{ color:'var(--text-muted)', flexShrink:0 }}/>
             </div>
           ))}
@@ -672,6 +672,11 @@ function DBBrowserModal({ onClose }: { onClose: () => void }) {
             ))}
             {selected && tab === 'browse' && (
               <div style={{ marginLeft:'auto', display:'flex', alignItems:'center', gap:8, padding:'0 14px' }}>
+                {queryResult && queryResult.count !== undefined && (
+                  <span style={{ fontSize:11, color:'var(--text-muted)' }}>
+                    {queryResult.count.toLocaleString()} total rows
+                  </span>
+                )}
                 <span style={{ fontSize:11, color:'var(--text-muted)' }}>Limit</span>
                 {[20, 100, 500].map(n => (
                   <button key={n} onClick={() => { setRowLimit(n); loadTable(selected, n) }}
@@ -1376,16 +1381,18 @@ export default function AdminPage() {
 
   return (
     <div className="admin-page">
-      <div className="section-header">
-        <div>
-          <h2 className="section-title">Pipeline &amp; Admin</h2>
-          <p className="text-muted text-sm" style={{ marginTop:4 }}>System status · User management · ML pipeline</p>
+      <div className="page-header">
+        <div className="page-header-left">
+          <div className="page-header-title">Pipeline &amp; Admin</div>
+          <div className="page-header-sub">System status · User management · ML pipeline</div>
         </div>
-        <a href="http://localhost:5555" target="_blank" rel="noreferrer"
-          className="btn btn-outline"
-          style={{ display:'flex', alignItems:'center', gap:6, fontSize:12, textDecoration:'none' }}>
-          <ExternalLink size={12}/> Flower
-        </a>
+        <div className="page-header-actions">
+          <a href="http://localhost:5555" target="_blank" rel="noreferrer"
+            className="btn btn-outline"
+            style={{ display:'flex', alignItems:'center', gap:6, fontSize:12, textDecoration:'none' }}>
+            <ExternalLink size={12}/> Flower
+          </a>
+        </div>
       </div>
 
       {/* System status */}

@@ -1,4 +1,4 @@
-"""Broker API historical OHLCV backfill — Angel One SmartAPI implementation.
+﻿"""Broker API historical OHLCV backfill — Angel One SmartAPI implementation.
 
 Credentials required in .env:
   BROKER_NAME=angel_one
@@ -53,7 +53,7 @@ def _login(settings):
         logger.error("angel_one.login_failed", response=resp)
         return None
     except Exception as exc:
-        logger.error("angel_one.login_error", error=str(exc))
+        logger.error("angel_one.login_error", err=str(exc))
         return None
 
 
@@ -71,7 +71,7 @@ def _load_symbol_token_map() -> dict[str, str]:
         logger.info("angel_one.scrip_master_loaded", symbols=len(token_map))
         return token_map
     except Exception as exc:
-        logger.error("angel_one.scrip_master_error", error=str(exc))
+        logger.error("angel_one.scrip_master_error", err=str(exc))
         return {}
 
 
@@ -101,7 +101,7 @@ def _fetch_candles(smart, token: str, from_date: date, to_date: date) -> list[di
                         "volume": int(v),
                     })
         except Exception as exc:
-            logger.warning("angel_one.candle_error", token=token, error=str(exc))
+            logger.warning("angel_one.candle_error", token=token, err=str(exc))
         cursor = chunk_end + timedelta(days=1)
         time.sleep(1.1)  # 1 req/s rate limit
     return results

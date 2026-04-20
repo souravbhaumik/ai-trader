@@ -1,4 +1,4 @@
-"""Invite-related request/response schemas."""
+﻿"""Invite-related request/response schemas."""
 from __future__ import annotations
 
 import uuid

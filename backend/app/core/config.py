@@ -1,4 +1,4 @@
-"""Application settings loaded from environment variables."""
+﻿"""Application settings loaded from environment variables."""
 from __future__ import annotations
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -94,6 +94,24 @@ class Settings(BaseSettings):
 
     # ── Logo.dev ───────────────────────────────────────────────────────────────
     logo_dev_token: str = ""    # pk_...  (public token for img.logo.dev)
+
+    # ── LLM Explainability ────────────────────────────────────────────────────
+    # Cascade: groq → gemini → local → disabled
+    explainability_backend: str = "groq"   # "groq" | "gemini" | "local" | "disabled"
+    groq_api_key: str = ""
+    gemini_api_key: str = ""
+    local_llm_path: str = ""               # path to GGUF model file for llama-cpp-python
+    explainability_confidence_threshold: float = 0.60  # only explain signals above this
+
+    # ── IP Rotator ─────────────────────────────────────────────────────────────
+    ip_rotator_backend: str = "none"       # "proxy_list" | "none"
+    ip_rotator_proxy_list: str = ""        # newline-separated proxy URIs
+    ip_rotator_strategy: str = "round_robin"  # "round_robin" | "random"
+
+    # ── Rate Limiting ──────────────────────────────────────────────────────────
+    rate_limit_default: str = "60/minute"
+    rate_limit_screener: str = "30/minute"
+    rate_limit_prices: str = "120/minute"
 
     # ── CORS & URLs ───────────────────────────────────────────────────────────
     allowed_origins: str = "http://localhost:3000"

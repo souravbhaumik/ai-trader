@@ -1,8 +1,8 @@
-"""Admin pipeline API — trigger and monitor Celery data tasks.
+"""Admin pipeline API � trigger and monitor Celery data tasks.
 
 Endpoints
 ---------
-POST  /admin/pipeline/backfill              Enqueue historical OHLCV backfill (yfinance)
+POST  /admin/pipeline/backfill              Enqueue historical OHLCV backfill (NSE Bhavcopy)
 GET   /admin/pipeline/backfill/progress     Poll backfill progress from Redis
 POST  /admin/pipeline/bhavcopy              Trigger NSE Bhavcopy ingest (manual)
 POST  /admin/pipeline/broker-backfill       Trigger broker API historical backfill (stub)
@@ -22,34 +22,18 @@ from typing import Any, Dict, Literal, Optional
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from jose import JWTError
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_session
-from app.core.security import decode_access_token
+from app.api.v1.deps import require_admin
 
 logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/admin/pipeline", tags=["admin-pipeline"])
 
 
-# ── Auth guard (reuse the same pattern as admin/users.py) ────────────────────
-
-async def _require_admin(request: Request, session: AsyncSession) -> None:
-    auth_hdr = request.headers.get("Authorization", "")
-    if not auth_hdr.startswith("Bearer "):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing bearer token.")
-    token = auth_hdr.removeprefix("Bearer ").strip()
-    try:
-        payload = decode_access_token(token)
-    except JWTError:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired token.")
-    if payload.get("role") != "admin":
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin role required.")
-
-
-# ── Schemas ───────────────────────────────────────────────────────────────────
+# -- Schemas -------------------------------------------------------------------
 
 class BackfillRequest(BaseModel):
     period: Literal["1y", "2y", "5y"] = "2y"
@@ -69,7 +53,7 @@ class BackfillProgress(BaseModel):
     ts: Optional[str] = None
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# -- Helpers -------------------------------------------------------------------
 
 def _get_sync_redis():
     """Synchronous Redis client for reading progress key (fire-and-forget reads)."""
@@ -78,7 +62,7 @@ def _get_sync_redis():
     return sync_redis.from_url(settings.redis_url, decode_responses=True)
 
 
-# ── Endpoints ─────────────────────────────────────────────────────────────────
+# -- Endpoints -----------------------------------------------------------------
 
 @router.post(
     "/backfill",
@@ -90,14 +74,14 @@ async def trigger_backfill(
     request: Request,
     session: AsyncSession = Depends(get_session),
 ):
-    """Enqueue a historical OHLCV backfill (admin only)."""
-    await _require_admin(request, session)
+    """Enqueue a historical OHLCV backfill via NSE Bhavcopy (admin only)."""
+    await require_admin(request, session)
 
     try:
         from app.tasks.backfill import backfill_universe
         result = backfill_universe.delay(period=body.period, force=body.force)
     except Exception as exc:
-        logger.error("pipeline.backfill_enqueue_failed", error=str(exc))
+        logger.error("pipeline.backfill_enqueue_failed", err=str(exc))
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "Could not reach Celery broker. Is the worker running?",
@@ -106,7 +90,7 @@ async def trigger_backfill(
     logger.info("pipeline.backfill_queued", task_id=result.id, period=body.period)
     return TaskEnqueuedResponse(
         task_id=result.id,
-        message=f"Backfill ({body.period}) enqueued. Poll /progress to track.",
+        message=f"NSE Bhavcopy backfill ({body.period}) enqueued. Poll /progress to track.",
     )
 
 
@@ -116,13 +100,13 @@ async def backfill_progress(
     session: AsyncSession = Depends(get_session),
 ):
     """Return the current backfill progress from Redis (admin only)."""
-    await _require_admin(request, session)
+    await require_admin(request, session)
 
     try:
         r = _get_sync_redis()
         raw = r.get("backfill:progress")
     except Exception as exc:
-        logger.warning("pipeline.progress_redis_error", error=str(exc))
+        logger.warning("pipeline.progress_redis_error", err=str(exc))
         return BackfillProgress(pct=0, message="Redis unavailable.", status="error")
 
     if not raw:
@@ -150,13 +134,13 @@ async def trigger_eod_ingest(
     session: AsyncSession = Depends(get_session),
 ):
     """Manually trigger an EOD OHLCV data pull (admin only)."""
-    await _require_admin(request, session)
+    await require_admin(request, session)
 
     try:
         from app.tasks.eod_ingest import ingest_eod
         result = ingest_eod.delay()
     except Exception as exc:
-        logger.error("pipeline.eod_ingest_enqueue_failed", error=str(exc))
+        logger.error("pipeline.eod_ingest_enqueue_failed", err=str(exc))
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "Could not reach Celery broker. Is the worker running?",
@@ -179,13 +163,13 @@ async def trigger_signal_generation(
     session: AsyncSession = Depends(get_session),
 ):
     """Manually trigger the technical-indicator signal generation task (admin only)."""
-    await _require_admin(request, session)
+    await require_admin(request, session)
 
     try:
         from app.tasks.signal_generator import generate_signals
         result = generate_signals.delay()
     except Exception as exc:
-        logger.error("pipeline.signal_gen_enqueue_failed", error=str(exc))
+        logger.error("pipeline.signal_gen_enqueue_failed", err=str(exc))
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "Could not reach Celery broker. Is the worker running?",
@@ -198,7 +182,7 @@ async def trigger_signal_generation(
     )
 
 
-# ── Phase 3: ML model management ──────────────────────────────────────────────
+# -- Phase 3: ML model management ----------------------------------------------
 
 class ModelInfo(BaseModel):
     id: str
@@ -210,6 +194,35 @@ class ModelInfo(BaseModel):
     trained_at: str
     promoted_at: Optional[str] = None
     notes: Optional[str] = None
+
+
+@router.post(
+    "/feature-engineering",
+    response_model=TaskEnqueuedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def trigger_feature_engineering(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    """Enqueue feature engineering validation across all active symbols (admin only)."""
+    await require_admin(request, session)
+
+    try:
+        from app.tasks.feature_engineering import run_feature_engineering
+        result = run_feature_engineering.delay()
+    except Exception as exc:
+        logger.error("pipeline.feature_engineering_enqueue_failed", err=str(exc))
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Could not reach Celery broker. Is the worker running?",
+        )
+
+    logger.info("pipeline.feature_engineering_queued", task_id=result.id)
+    return TaskEnqueuedResponse(
+        task_id=result.id,
+        message="Feature engineering check enqueued.",
+    )
 
 
 @router.post(
@@ -226,13 +239,13 @@ async def trigger_model_training(
     Training runs asynchronously. Poll ``GET /admin/pipeline/models`` to see
     when the new version appears and then promote it.
     """
-    await _require_admin(request, session)
+    await require_admin(request, session)
 
     try:
         from app.tasks.ml_training import train_model
         result = train_model.delay()
     except Exception as exc:
-        logger.error("pipeline.train_model_enqueue_failed", error=str(exc))
+        logger.error("pipeline.train_model_enqueue_failed", err=str(exc))
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "Could not reach Celery broker. Is the worker running?",
@@ -251,7 +264,7 @@ async def list_models(
     session: AsyncSession = Depends(get_session),
 ):
     """List all trained model versions (admin only)."""
-    await _require_admin(request, session)
+    await require_admin(request, session)
 
     from sqlalchemy import text as _text
     rows = (await session.execute(
@@ -292,7 +305,7 @@ async def promote_model(
     this version as active. The signal generator reloads it within 5 min
     (or immediately if the worker is restarted).
     """
-    await _require_admin(request, session)
+    await require_admin(request, session)
 
     from sqlalchemy import text as _text
 
@@ -335,7 +348,7 @@ async def promote_model(
         from app.services.ml_loader import force_reload
         force_reload()
     except Exception:
-        pass  # loader may not be warmed in the API process — that's fine
+        pass  # loader may not be warmed in the API process � that's fine
 
     logger.info("pipeline.model_promoted", model_id=model_id, model_type=m_type, promoted_by=admin_id)
 
@@ -365,7 +378,7 @@ async def rollback_model(
     session: AsyncSession = Depends(get_session),
 ):
     """Deactivate the specified model, reverting to technical-only signals (admin only)."""
-    await _require_admin(request, session)
+    await require_admin(request, session)
 
     from sqlalchemy import text as _text
 
@@ -389,7 +402,7 @@ async def rollback_model(
     return {"status": "rolled_back", "model_id": str(row[0]), "version": row[1]}
 
 
-# ── NSE Bhavcopy ingest ───────────────────────────────────────────────────────
+# -- NSE Bhavcopy ingest -------------------------------------------------------
 
 class BhavcopRequest(BaseModel):
     trade_date: Optional[str] = None   # ISO date string; defaults to today in the task
@@ -406,13 +419,13 @@ async def trigger_bhavcopy(
     session: AsyncSession = Depends(get_session),
 ):
     """Manually trigger an NSE Bhavcopy ingest for a given date (admin only)."""
-    await _require_admin(request, session)
+    await require_admin(request, session)
 
     try:
         from app.tasks.bhavcopy import ingest_bhavcopy
         result = ingest_bhavcopy.delay(trade_date_str=body.trade_date)
     except Exception as exc:
-        logger.error("pipeline.bhavcopy_enqueue_failed", error=str(exc))
+        logger.error("pipeline.bhavcopy_enqueue_failed", err=str(exc))
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "Could not reach Celery broker. Is the worker running?",
@@ -426,7 +439,7 @@ async def trigger_bhavcopy(
     )
 
 
-# ── Broker API historical backfill ────────────────────────────────────────────
+# -- Broker API historical backfill --------------------------------------------
 
 class BrokerBackfillRequest(BaseModel):
     period: Literal["1y", "2y", "5y"] = "1y"
@@ -446,13 +459,13 @@ async def trigger_broker_backfill(
 
     Returns a clear error until BROKER_NAME is set in .env.
     """
-    await _require_admin(request, session)
+    await require_admin(request, session)
 
     try:
         from app.tasks.broker_backfill import run_broker_backfill
         result = run_broker_backfill.delay(period=body.period)
     except Exception as exc:
-        logger.error("pipeline.broker_backfill_enqueue_failed", error=str(exc))
+        logger.error("pipeline.broker_backfill_enqueue_failed", err=str(exc))
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "Could not reach Celery broker. Is the worker running?",
@@ -468,7 +481,7 @@ async def trigger_broker_backfill(
     )
 
 
-# ── Universe population ───────────────────────────────────────────────────────
+# -- Universe population -------------------------------------------------------
 
 class PopulateUniverseRequest(BaseModel):
     nifty500_only: bool = False
@@ -490,13 +503,13 @@ async def trigger_populate_universe(
     nifty500_only=True inserts only Nifty 500 symbols (~500 rows, fast).
     nifty500_only=False inserts the full NSE EQ universe (~2100 rows).
     """
-    await _require_admin(request, session)
+    await require_admin(request, session)
 
     try:
         from app.tasks.universe_population import populate_universe
         result = populate_universe.delay(nifty500_only=body.nifty500_only)
     except Exception as exc:
-        logger.error("pipeline.populate_universe_enqueue_failed", error=str(exc))
+        logger.error("pipeline.populate_universe_enqueue_failed", err=str(exc))
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "Could not reach Celery broker. Is the worker running?",
@@ -506,11 +519,11 @@ async def trigger_populate_universe(
     logger.info("pipeline.populate_universe_queued", task_id=result.id, scope=scope)
     return TaskEnqueuedResponse(
         task_id=result.id,
-        message=f"Universe population enqueued ({scope}). Takes ~30–60 seconds.",
+        message=f"Universe population enqueued ({scope}). Takes ~30�60 seconds.",
     )
 
 
-# ── Logo download ─────────────────────────────────────────────────────────────
+# -- Logo download -------------------------------------------------------------
 
 @router.post(
     "/download-logos",
@@ -526,33 +539,22 @@ async def trigger_download_logos(
     Safe to re-run: symbols that already have a cached PNG are skipped.
     New symbols added to stock_universe will get their logos on the next run.
     """
-    await _require_admin(request, session)
+    await require_admin(request, session)
 
-    import asyncio
-    import threading
-    import uuid
+    try:
+        from app.tasks.download_logos import download_logos
+        result = download_logos.delay()
+    except Exception as exc:
+        logger.error("pipeline.download_logos_enqueue_failed", err=str(exc))
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Could not reach Celery broker. Is the worker running?",
+        )
 
-    task_id = str(uuid.uuid4())
-
-    def _run() -> None:
-        import sys
-        from pathlib import Path
-        # The download script is at /app/scripts/download_logos.py inside the container
-        script = Path(__file__).parents[5] / "scripts" / "download_logos.py"
-        sys.path.insert(0, str(script.parent.parent))
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("download_logos", script)
-        mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
-        spec.loader.exec_module(mod)  # type: ignore[union-attr]
-        asyncio.run(mod.run())
-
-    thread = threading.Thread(target=_run, daemon=True, name="logo-download")
-    thread.start()
-
-    logger.info("pipeline.download_logos_started", task_id=task_id)
+    logger.info("pipeline.download_logos_enqueued", task_id=result.id)
     return TaskEnqueuedResponse(
-        task_id=task_id,
-        message="Logo download started in background. Check backend logs for progress.",
+        task_id=result.id,
+        message="Logo download enqueued. Check Admin ? Pipeline ? Step 9 logs for progress.",
     )
 
 _ALL_TASK_NAMES = [
@@ -560,10 +562,12 @@ _ALL_TASK_NAMES = [
     "broker_backfill",
     "bhavcopy",
     "backfill",
+    "feature_engineering",
     "eod_ingest",
     "ml_training",
     "signal_generator",
     "news_sentiment",
+    "logo_download",
 ]
 
 
@@ -589,7 +593,7 @@ async def pipeline_status(
     session: AsyncSession = Depends(get_session),
 ):
     """Return last-run status for every pipeline task (admin only)."""
-    await _require_admin(request, session)
+    await require_admin(request, session)
 
     from app.tasks.task_utils import read_all_task_statuses
 
@@ -605,7 +609,7 @@ async def task_logs(
     session:   AsyncSession = Depends(get_session),
 ):
     """Return the last *limit* log lines for a pipeline task (admin only)."""
-    await _require_admin(request, session)
+    await require_admin(request, session)
 
     if task_name not in _ALL_TASK_NAMES:
         raise HTTPException(

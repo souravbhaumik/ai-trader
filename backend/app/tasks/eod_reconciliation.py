@@ -1,4 +1,4 @@
-"""EOD live-order reconciliation task.
+﻿"""EOD live-order reconciliation task.
 
 Runs at 4:00 PM IST Mon–Fri (16 minutes before market close so any open orders
 can still be cancelled if needed).
@@ -53,68 +53,76 @@ def reconcile_live_orders(self) -> dict:
 
     logger.info("eod_reconciliation.found_open_orders", count=len(rows))
 
+    # Group orders by (user_id, broker) to authenticate once per user
+    from collections import defaultdict
+    user_orders: dict[tuple[str, str], list] = defaultdict(list)
     for row in rows:
-        order_id        = str(row.id)
-        broker_order_id = row.broker_order_id
-        local_status    = row.status
-        user_id         = str(row.user_id)
-        preferred_broker = row.preferred_broker or "yfinance"
+        key = (str(row.user_id), row.preferred_broker or "yfinance")
+        user_orders[key].append(row)
 
+    for (user_id, broker), orders in user_orders.items():
         try:
-            broker_result = asyncio.run(
-                _fetch_order_status(user_id, preferred_broker, broker_order_id)
+            broker_statuses = asyncio.run(
+                _fetch_order_statuses_batch(user_id, broker, [r.broker_order_id for r in orders])
             )
         except Exception as exc:
             logger.error(
-                "eod_reconciliation.broker_query_failed",
-                order_id=order_id,
-                broker_order_id=broker_order_id,
+                "eod_reconciliation.broker_batch_failed",
+                user_id=user_id,
+                broker=broker,
+                count=len(orders),
                 error=str(exc),
             )
             continue
 
-        if broker_result is None:
-            logger.warning(
-                "eod_reconciliation.order_not_found_at_broker",
-                order_id=order_id,
-                broker_order_id=broker_order_id,
-            )
-            continue
+        for row_data in orders:
+            order_id = str(row_data.id)
+            broker_order_id = row_data.broker_order_id
+            local_status = row_data.status
 
-        broker_status = broker_result.status.upper()
-        reconciled += 1
-
-        if broker_status != local_status.upper():
-            mismatches += 1
-            logger.warning(
-                "eod_reconciliation.status_mismatch",
-                order_id=order_id,
-                broker_order_id=broker_order_id,
-                local_status=local_status,
-                broker_status=broker_status,
-            )
-            now_ts = datetime.now(timezone.utc).replace(tzinfo=None)
-            with get_sync_session() as session:
-                session.execute(
-                    text("""
-                        UPDATE live_orders
-                        SET    status         = :status,
-                               broker_status  = :bstat,
-                               filled_qty     = :fq,
-                               avg_fill_price = :afp,
-                               updated_at     = :now
-                        WHERE  id = :id
-                    """),
-                    {
-                        "status": broker_status,
-                        "bstat":  broker_status,
-                        "fq":     broker_result.filled_qty if hasattr(broker_result, "filled_qty") else 0,
-                        "afp":    broker_result.avg_price if hasattr(broker_result, "avg_price") else 0,
-                        "now":    now_ts,
-                        "id":     order_id,
-                    },
+            broker_result = broker_statuses.get(broker_order_id)
+            if broker_result is None:
+                logger.warning(
+                    "eod_reconciliation.order_not_found_at_broker",
+                    order_id=order_id,
+                    broker_order_id=broker_order_id,
                 )
-                session.commit()
+                continue
+
+            broker_status = broker_result.status.upper()
+            reconciled += 1
+
+            if broker_status != local_status.upper():
+                mismatches += 1
+                logger.warning(
+                    "eod_reconciliation.status_mismatch",
+                    order_id=order_id,
+                    broker_order_id=broker_order_id,
+                    local_status=local_status,
+                    broker_status=broker_status,
+                )
+                now_ts = datetime.now(timezone.utc).replace(tzinfo=None)
+                with get_sync_session() as session:
+                    session.execute(
+                        text("""
+                            UPDATE live_orders
+                            SET    status         = :status,
+                                   broker_status  = :bstat,
+                                   filled_qty     = :fq,
+                                   avg_fill_price = :afp,
+                                   updated_at     = :now
+                            WHERE  id = :id
+                        """),
+                        {
+                            "status": broker_status,
+                            "bstat":  broker_status,
+                            "fq":     broker_result.filled_qty if hasattr(broker_result, "filled_qty") else 0,
+                            "afp":    broker_result.avg_price if hasattr(broker_result, "avg_price") else 0,
+                            "now":    now_ts,
+                            "id":     order_id,
+                        },
+                    )
+                    session.commit()
 
     logger.info(
         "eod_reconciliation.completed",
@@ -125,21 +133,37 @@ def reconcile_live_orders(self) -> dict:
     return {"total_open": len(rows), "reconciled": reconciled, "mismatches": mismatches}
 
 
-async def _fetch_order_status(user_id: str, preferred_broker: str, broker_order_id: str):
-    """Async helper: build adapter and query order status."""
+async def _fetch_order_statuses_batch(
+    user_id: str, preferred_broker: str, broker_order_ids: list[str]
+) -> dict:
+    """Async helper: authenticate once and query all order statuses for a user.
+
+    Returns a dict mapping broker_order_id → OrderResult.
+    """
     from app.core.database import get_session as get_async_session  # noqa: PLC0415
 
+    results = {}
     async for db in get_async_session():
         from app.brokers.factory import get_adapter_for_user  # noqa: PLC0415
         adapter = await get_adapter_for_user(user_id, preferred_broker, db)
         try:
             await adapter.connect()
-            result = await adapter.get_order_status(broker_order_id)
+            for oid in broker_order_ids:
+                try:
+                    result = await adapter.get_order_status(oid)
+                    if result is not None:
+                        results[oid] = result
+                except Exception as exc:
+                    logger.warning(
+                        "eod_reconciliation.single_order_query_failed",
+                        broker_order_id=oid,
+                        error=str(exc),
+                    )
         finally:
             try:
                 await adapter.disconnect()
             except Exception:
                 pass
-        return result
+        break
 
-    return None
+    return results

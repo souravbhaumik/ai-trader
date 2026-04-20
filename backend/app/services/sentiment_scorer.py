@@ -1,4 +1,4 @@
-"""FinBERT sentiment scorer — Phase 4.
+﻿"""FinBERT sentiment scorer — Phase 4.
 
 Loads ``ProsusAI/finbert`` once per worker process (lazy, thread-safe) and
 scores batches of financial headlines. The model is kept on CPU by default;
@@ -61,7 +61,7 @@ def _get_pipeline():
                     )
                     logger.info("finbert.loaded", model=_FINBERT_MODEL, device=device)
                 except Exception as exc:
-                    logger.error("finbert.load_failed", error=str(exc))
+                    logger.error("finbert.load_failed", err=str(exc))
                     _PIPELINE = False  # sentinel
     return _PIPELINE if _PIPELINE else None
 
@@ -136,8 +136,8 @@ def score_headlines(headlines: list[str]) -> list[SentimentResult]:
     """Score a list of headlines and return one ``SentimentResult`` per headline.
 
     Falls back to neutral (0.33 each) if the pipeline is unavailable.
-    Texts longer than 510 tokens are processed via sliding-window chunking so
-    no content is ever silently discarded.
+    Short texts that fit within the 512-token limit are scored in a single
+    batch pass. Longer texts are handled via sliding-window chunking.
     """
     pipe = _get_pipeline()
     neutral_fallback = SentimentResult("neutral", 0.33, 0.33)
@@ -147,10 +147,43 @@ def score_headlines(headlines: list[str]) -> list[SentimentResult]:
 
     results: list[SentimentResult] = []
     try:
-        for text in headlines:
-            results.append(_score_one(text, pipe))
+        tokenizer = pipe.tokenizer
+        short_texts: list[str] = []
+        short_indices: list[int] = []
+        long_indices: list[int] = []
+
+        # Pre-allocate results
+        results = [neutral_fallback] * len(headlines)
+
+        # Separate short vs long texts
+        for i, text in enumerate(headlines):
+            if not text or not text.strip():
+                continue
+            ids = tokenizer.encode(text, add_special_tokens=False)
+            if len(ids) <= _MAX_LENGTH - 2:
+                short_texts.append(text)
+                short_indices.append(i)
+            else:
+                long_indices.append(i)
+
+        # Batch score short texts in one pass
+        if short_texts:
+            batch_outputs = pipe(short_texts, truncation=True, max_length=_MAX_LENGTH,
+                                 batch_size=_BATCH_SIZE)
+            for idx, label_scores in zip(short_indices, batch_outputs):
+                lm = {item["label"].lower(): item["score"] for item in label_scores}
+                pos = lm.get("positive", 0.0)
+                neg = lm.get("negative", 0.0)
+                neu = lm.get("neutral", 0.0)
+                best = max(lm, key=lm.get)  # type: ignore[arg-type]
+                results[idx] = SentimentResult(best, round(pos, 4), round(max(pos, neg, neu), 4))
+
+        # Score long texts individually via chunking
+        for idx in long_indices:
+            results[idx] = _score_one(headlines[idx], pipe)
+
     except Exception as exc:
-        logger.error("finbert.score_failed", error=str(exc))
+        logger.error("finbert.score_failed", err=str(exc))
         results = [neutral_fallback] * len(headlines)
 
     return results

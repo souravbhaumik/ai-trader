@@ -1,4 +1,4 @@
-"""ML model loader — Phase 3.
+﻿"""ML model loader — Phase 3.
 
 Provides a thread-safe singleton that loads the currently active LightGBM
 model from disk (based on the ``ml_models`` table) and exposes a
@@ -85,7 +85,7 @@ def _load_active_model() -> bool:
         return True
 
     except Exception as exc:
-        logger.error("ml_loader.load_failed", error=str(exc))
+        logger.error("ml_loader.load_failed", err=str(exc))
         return False
 
 

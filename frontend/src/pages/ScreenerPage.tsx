@@ -66,12 +66,12 @@ export default function ScreenerPage() {
 
   return (
     <div className="screener-page">
-      <div className="section-header">
-        <div>
-          <h2 className="section-title">Market Screener</h2>
-          <p className="text-muted text-sm" style={{ marginTop:4 }}>
-            {result ? `${result.total.toLocaleString()} stocks · via ${result.broker ?? 'yfinance'}` : 'Nifty 500 universe'}
-          </p>
+      <div className="page-header">
+        <div className="page-header-left">
+          <div className="page-header-title">Market Screener</div>
+          <div className="page-header-sub">
+            {result ? `${result.total.toLocaleString()} stocks · via ${result.broker ?? 'none'}` : 'Nifty 500 universe'}
+          </div>
         </div>
       </div>
 

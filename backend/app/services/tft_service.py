@@ -1,4 +1,4 @@
-"""Temporal Fusion Transformer (TFT) price forecasting service — Phase 5.
+﻿"""Temporal Fusion Transformer (TFT) price forecasting service — Phase 5.
 
 Loads a pre-trained TFT-inspired Transformer artifact and generates
 multi-step (5-day) price forecasts for any symbol.
@@ -133,7 +133,12 @@ def _load_model() -> bool:
         return False
     try:
         import torch  # noqa: PLC0415
-        payload = torch.load(_MODEL_PATH, map_location="cpu", weights_only=False)
+        try:
+            payload = torch.load(_MODEL_PATH, map_location="cpu", weights_only=True)
+        except Exception:
+            logger.warning("tft_service.unsafe_load",
+                           msg="Artifact requires weights_only=False; re-save with safe format")
+            payload = torch.load(_MODEL_PATH, map_location="cpu", weights_only=False)  # noqa: S301
         model   = _build_model(payload["config"])
         model.load_state_dict(payload["state_dict"])
         model.eval()
@@ -146,7 +151,7 @@ def _load_model() -> bool:
         logger.info("tft_service.loaded", version=_state.version)
         return True
     except Exception as exc:
-        logger.error("tft_service.load_failed", error=str(exc))
+        logger.error("tft_service.load_failed", err=str(exc))
         return False
 
 
@@ -284,7 +289,7 @@ def forecast(
             "version":      _state.version,
         }
     except Exception as exc:
-        logger.warning("tft_service.forecast_failed", symbol=symbol, error=str(exc))
+        logger.warning("tft_service.forecast_failed", symbol=symbol, err=str(exc))
         return None
 
 

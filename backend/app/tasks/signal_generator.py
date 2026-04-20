@@ -1,4 +1,4 @@
-"""Technical-indicator + ML signal generation task — Phase 2 / Phase 3.
+﻿"""Technical-indicator + ML signal generation task — Phase 2 / Phase 3.
 
 Runs after EOD data ingestion (4:45 PM IST Mon–Fri).  Reads the last
 N days of daily OHLCV from ``ohlcv_daily``, computes three indicators,
@@ -57,63 +57,34 @@ _W_SENTIMENT = float(os.getenv("SIGNAL_WEIGHT_SENTIMENT", "0.15"))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Pure-Python indicator maths (no pandas / numpy dependency in worker)
+#  Technical indicators — delegated to feature_engineer (single source of truth)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _ema(values: List[float], period: int) -> List[float]:
-    """Exponential moving average — returns list same length as ``values``."""
-    if len(values) < period:
-        return [float("nan")] * len(values)
-    k = 2.0 / (period + 1)
-    result: List[float] = [float("nan")] * (period - 1)
-    # seed with simple average of first `period` elements
-    seed = sum(values[:period]) / period
-    result.append(seed)
-    for v in values[period:]:
-        result.append(v * k + result[-1] * (1 - k))
-    return result
+import numpy as np
 
 
 def _rsi(closes: List[float], period: int = 14) -> Optional[float]:
-    """RSI of the most-recent bar.  Returns None when history is too short."""
-    if len(closes) < period + 1:
-        return None
-    gains, losses = [], []
-    for i in range(1, len(closes)):
-        delta = closes[i] - closes[i - 1]
-        gains.append(max(delta, 0.0))
-        losses.append(max(-delta, 0.0))
-    # Wilder smoothed average (simple seed then exponential)
-    avg_gain = sum(gains[:period]) / period
-    avg_loss = sum(losses[:period]) / period
-    for g, l in zip(gains[period:], losses[period:]):
-        avg_gain = (avg_gain * (period - 1) + g) / period
-        avg_loss = (avg_loss * (period - 1) + l) / period
-    if avg_loss == 0:
-        return 100.0
-    rs = avg_gain / avg_loss
-    return 100.0 - (100.0 / (1 + rs))
+    """RSI of the most-recent bar. Delegates to feature_engineer."""
+    from app.services.feature_engineer import _rsi as _fe_rsi
+    c = np.array(closes, dtype=float)
+    val = _fe_rsi(c, period)
+    return None if np.isnan(val) else float(val)
 
 
 def _macd(closes: List[float]) -> Tuple[Optional[float], Optional[float]]:
-    """Return (macd_line, signal_line) for the most-recent bar.
-
-    Uses standard 12/26/9 parameters.
-    Returns (None, None) when history is too short.
-    """
-    if len(closes) < 35:   # 26 EMA + 9 signal EMA minimum
+    """Return (macd_line, signal_line) for the most-recent bar."""
+    from app.services.feature_engineer import _ema
+    if len(closes) < 35:
         return None, None
-    ema12 = _ema(closes, 12)
-    ema26 = _ema(closes, 26)
-    macd_line = [
-        (m - e) if (m == m and e == e) else float("nan")
-        for m, e in zip(ema12, ema26)
-    ]
-    valid = [v for v in macd_line if v == v]  # drop NaN
-    if len(valid) < 9:
+    c = np.array(closes, dtype=float)
+    e12 = _ema(c, 12)
+    e26 = _ema(c, 26)
+    macd_line = e12 - e26
+    valid_start = 25
+    signal = _ema(macd_line[valid_start:], 9)
+    if len(signal) == 0 or np.isnan(signal[-1]):
         return None, None
-    signal_ema = _ema(valid, 9)
-    return valid[-1], signal_ema[-1]
+    return float(macd_line[-1]), float(signal[-1])
 
 
 def _bollinger(closes: List[float], period: int = 20) -> Tuple[Optional[float], Optional[float], Optional[float]]:
@@ -256,7 +227,7 @@ def generate_signals(self):
                     sym = k.removeprefix("sentiment:")
                     sentiment_cache[sym] = float(_json.loads(v).get("score", 0.0))
     except Exception as exc:
-        logger.warning("signal_generator.sentiment_prefetch_failed", error=str(exc))
+        logger.warning("signal_generator.sentiment_prefetch_failed", err=str(exc))
 
     with get_sync_session() as session:
         # ── 1. Load active symbols ─────────────────────────────────────────────
@@ -444,7 +415,7 @@ def generate_signals(self):
                         sl=stop_loss,
                     )
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning("signal_generator.discord_failed", error=str(exc))
+                    logger.warning("signal_generator.discord_failed", err=str(exc))
 
                 # ── Real-time WebSocket push via Redis pub/sub (best-effort) ───
                 try:
@@ -465,7 +436,7 @@ def generate_signals(self):
                     }))
                     _r.close()
                 except Exception as exc:  # noqa: BLE001
-                    logger.debug("signal_generator.redis_publish_failed", error=str(exc))
+                    logger.debug("signal_generator.redis_publish_failed", err=str(exc))
 
                 # ── Paper trade auto-execution (Phase 5, best-effort) ──────────
                 try:
@@ -482,7 +453,25 @@ def generate_signals(self):
                     if placed:
                         logger.info("paper_trade.auto_queued", symbol=sym, users=placed)
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning("paper_trade.auto_failed", error=str(exc))
+                    logger.warning("paper_trade.auto_failed", err=str(exc))
+
+                # ── Async LLM explanation (low_priority queue, best-effort) ────
+                # Only queue for high-confidence BUY/SELL signals; HOLD never explained.
+                try:
+                    from app.core.config import settings as _cfg  # noqa: PLC0415
+                    if (
+                        final_dir in ("BUY", "SELL")
+                        and final_conf >= _cfg.explainability_confidence_threshold
+                        and _cfg.explainability_backend != "disabled"
+                    ):
+                        from app.tasks.explain_signal import explain_signal  # noqa: PLC0415
+                        explain_signal.apply_async(
+                            args=[str(sig_id)],
+                            queue="low_priority",
+                            countdown=5,   # brief delay so DB row is committed first
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("signal_generator.explain_queue_failed", err=str(exc))
 
             session.commit()   # commits signals + paper trades for the batch
             # Log progress every 5 batches

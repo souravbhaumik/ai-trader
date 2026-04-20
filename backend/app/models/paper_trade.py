@@ -1,4 +1,4 @@
-"""PaperTrade SQLModel — maps to the ``paper_trades`` table."""
+﻿"""PaperTrade SQLModel — maps to the ``paper_trades`` table."""
 from __future__ import annotations
 
 import uuid

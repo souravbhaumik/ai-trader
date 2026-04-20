@@ -1,15 +1,17 @@
-"""Screener API — paginated, filterable Nifty 500 stock screener."""
+﻿"""Screener API — paginated, filterable Nifty 500 stock screener."""
 from __future__ import annotations
 
 from typing import Annotated, Optional
 
 import structlog
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_user, get_current_user_settings
 from app.brokers.factory import get_adapter_for_user
+from app.core.config import settings
 from app.core.database import get_session
+from app.core.rate_limiter import limiter
 from app.models.user import User
 from app.models.user_settings import UserSettings
 from app.services import screener_service
@@ -20,7 +22,9 @@ router = APIRouter(prefix="/screener", tags=["screener"])
 
 
 @router.get("")
+@limiter.limit(settings.rate_limit_screener)
 async def screener(
+    request: Request,
     user: Annotated[User, Depends(get_current_user)],
     user_settings: Annotated[UserSettings, Depends(get_current_user_settings)],
     session: AsyncSession = Depends(get_session),
@@ -44,10 +48,10 @@ async def screener(
     )
     result["broker"]       = adapter.broker_name
     result["is_configured"] = adapter.is_credentials_configured()
-    if not result["is_configured"] and adapter.broker_name != "yfinance":
+    if not result["is_configured"]:
         result["warning"] = (
-            f"{user_settings.preferred_broker} credentials not configured. "
-            "Prices shown from yfinance (15-min delayed)."
+            f"{user_settings.preferred_broker or 'Broker'} credentials not configured. "
+            "Prices are unavailable (showing 0.00)."
         )
     return result
 

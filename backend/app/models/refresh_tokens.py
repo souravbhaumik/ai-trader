@@ -1,4 +1,4 @@
-﻿"""RefreshToken SQLModel — maps to the `refresh_tokens` table."""
+﻿"""RefreshToken SQLModel � maps to the `refresh_tokens` table."""
 from __future__ import annotations
 
 import uuid

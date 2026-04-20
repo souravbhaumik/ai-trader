@@ -42,6 +42,9 @@ numpy==1.26.4
 # ─── Resilience ──────────────────────────────────────────────────────────────
 tenacity==8.3.0
 
+# ─── Rate Limiting ───────────────────────────────────────────────────────────
+slowapi==0.1.9
+
 # ─── Broker SDKs (Phase 2) ────────────────────────────────────────────────────
 smartapi-python==1.4.0          # Angel One SmartAPI
 websocket-client==1.8.0         # Required by smartapi-python
@@ -61,6 +64,13 @@ rapidfuzz==3.9.3                # Fuzzy company-name → symbol matching
 lightgbm==4.3.0                 # Gradient boosting classifier for signal prediction
 scikit-learn==1.5.0             # train_test_split, metrics
 mlflow==2.14.1                  # Experiment tracking (optional; set MLFLOW_TRACKING_URI to enable)
+river==0.21.2                   # Online ML (AMF, ADWIN drift detection)
+hdbscan==0.8.38.post1           # Market regime clustering
 
 # ─── Deep Learning models (Phase 5) ───────────────────────────────────────────
 gdown==5.2.0                    # Download model artifacts from Google Drive
+
+# ─── LLM Explainability (Phase 6) ────────────────────────────────────────────
+groq==0.11.0                    # Groq API client (primary LLM — llama-3.3-70b-versatile)
+google-generativeai==0.8.3      # Gemini 2.0 Flash (fallback LLM)
+# llama-cpp-python==0.2.90      # Local GGUF inference (offline fallback — heavy; install manually if needed)

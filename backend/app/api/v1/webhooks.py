@@ -1,4 +1,4 @@
-"""Broker postback webhook — Angel One order-update notifications.
+﻿"""Broker postback webhook — Angel One order-update notifications.
 
 Angel One POSTs order status changes to this endpoint.
 The callback URL must be registered in the Angel One developer portal.
@@ -23,6 +23,7 @@ When Angel One adds HMAC signing, add the signature check at the top of the hand
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, HTTPException, Request, status
@@ -36,6 +37,14 @@ _KNOWN_STATUSES = {
     "open", "complete", "cancelled", "rejected", "pending",
     "OPEN", "COMPLETE", "CANCELLED", "REJECTED", "PENDING",
 }
+
+# ── Webhook authentication ────────────────────────────────────────────────────
+_WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
+_WEBHOOK_IP_ALLOWLIST: set[str] = set(
+    ip.strip()
+    for ip in os.getenv("WEBHOOK_IP_ALLOWLIST", "").split(",")
+    if ip.strip()
+)
 
 
 class OrderUpdatePayload(BaseModel):
@@ -62,6 +71,21 @@ async def broker_order_update(request: Request):
     the originating FastAPI thread committed the INSERT), we schedule a Celery
     retry task with a 3-second countdown so the retry runs after the commit.
     """
+    # ── Authentication: shared secret header ──────────────────────────────────
+    if _WEBHOOK_SECRET:
+        import hmac
+        provided = request.headers.get("X-Webhook-Secret", "")
+        if not hmac.compare_digest(provided, _WEBHOOK_SECRET):
+            logger.warning("webhook.auth_failed", ip=request.client.host if request.client else "?")
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Invalid webhook secret")
+
+    # ── Authentication: IP allowlist ──────────────────────────────────────────
+    if _WEBHOOK_IP_ALLOWLIST:
+        client_ip = request.client.host if request.client else ""
+        if client_ip not in _WEBHOOK_IP_ALLOWLIST:
+            logger.warning("webhook.ip_blocked", ip=client_ip)
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "IP not allowed")
+
     try:
         raw: Dict[str, Any] = await request.json()
     except Exception:
@@ -71,7 +95,7 @@ async def broker_order_update(request: Request):
     try:
         payload = OrderUpdatePayload(**raw)
     except Exception as exc:
-        logger.warning("webhook.invalid_payload", error=str(exc), raw=raw)
+        logger.warning("webhook.invalid_payload", err=str(exc), raw=raw)
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid payload: {exc}")
 
     broker_order_id = payload.orderid
@@ -106,7 +130,7 @@ async def broker_order_update(request: Request):
                 countdown=3,   # wait 3 s for the originating transaction to commit
             )
         except Exception as exc:
-            logger.error("webhook.retry_schedule_failed", error=str(exc))
+            logger.error("webhook.retry_schedule_failed", err=str(exc))
 
     # Always return 200 — broker will not retry on non-2xx (varies by provider)
     return {"received": True}
@@ -175,7 +199,7 @@ async def _update_order(
                 },
             })
         except Exception as ws_exc:
-            logger.debug("webhook.ws_push_failed", error=str(ws_exc))
+            logger.debug("webhook.ws_push_failed", err=str(ws_exc))
 
         return True
 

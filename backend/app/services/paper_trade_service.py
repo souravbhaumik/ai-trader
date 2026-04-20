@@ -1,4 +1,4 @@
-"""Paper trading service — Phase 5.
+﻿"""Paper trading service — Phase 5.
 
 Handles all business logic for paper trades:
 - auto_paper_trade()  called from signal_generator (sync/Celery)
@@ -8,12 +8,13 @@ Handles all business logic for paper trades:
 
 Paper trades simulate real execution using yfinance prices as needed.
 Cash balance is maintained in user_settings.paper_balance.
+Brokerage fee of 0.03% is deducted on both entry and exit.
 """
 from __future__ import annotations
 
 import uuid
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from typing import Optional
 
@@ -23,10 +24,53 @@ from sqlalchemy.ext.asyncio import AsyncSession
 logger = logging.getLogger(__name__)
 
 _AUTO_TRADE_ENV = "PAPER_AUTO_TRADE"   # set to "true" to enable auto-execution
+_BROKERAGE_PCT = Decimal("0.0003")     # 0.03% per leg
 
 
 def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+async def _enforce_daily_loss_limit(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+) -> None:
+    """Raise ValueError if today's realized losses exceed daily_loss_limit_pct."""
+    row = await session.execute(
+        text("""
+            SELECT paper_balance, daily_loss_limit_pct
+            FROM   user_settings
+            WHERE  user_id = :uid
+        """),
+        {"uid": str(user_id)},
+    )
+    settings = row.first()
+    if settings is None:
+        return
+    balance, limit_pct = Decimal(str(settings[0])), Decimal(str(settings[1] or 0))
+    if limit_pct <= 0:
+        return  # not configured
+
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
+    loss_row = await session.execute(
+        text("""
+            SELECT COALESCE(SUM(pnl), 0)
+            FROM   paper_trades
+            WHERE  user_id = :uid
+              AND  status != 'open'
+              AND  exit_at >= :today
+              AND  pnl < 0
+        """),
+        {"uid": str(user_id), "today": today_start},
+    )
+    daily_loss = abs(Decimal(str(loss_row.scalar() or 0)))
+    max_loss = balance * limit_pct / Decimal("100")
+
+    if daily_loss >= max_loss:
+        raise ValueError(
+            f"Daily loss limit reached: ₹{daily_loss:,.2f} lost today "
+            f"(limit: {limit_pct}% = ₹{max_loss:,.2f}). Trading paused until tomorrow."
+        )
 
 
 # ── Sync helpers (used by Celery signal_generator) ───────────────────────────
@@ -78,7 +122,9 @@ def auto_paper_trade(
                 continue
 
             cost = entry * qty
-            if cost > paper_balance:
+            brokerage = cost * _BROKERAGE_PCT
+            total_cost = cost + brokerage
+            if total_cost > paper_balance:
                 continue          # not enough balance
 
             trade_id = str(uuid.uuid4())
@@ -107,7 +153,7 @@ def auto_paper_trade(
                 },
             )
 
-            # Deduct cost from paper balance
+            # Deduct cost + brokerage from paper balance
             session.execute(
                 text("""
                     UPDATE user_settings
@@ -115,7 +161,7 @@ def auto_paper_trade(
                            updated_at   = :now
                     WHERE  user_id = :user_id
                 """),
-                {"cost": float(cost), "now": now_ts, "user_id": str(user_id)},
+                {"cost": float(total_cost), "now": now_ts, "user_id": str(user_id)},
             )
             placed += 1
 
@@ -159,10 +205,15 @@ async def open_trade(
         )
 
     cost = entry_price * qty
-    if cost > balance:
+    brokerage = cost * _BROKERAGE_PCT
+    total_cost = cost + brokerage
+    if total_cost > balance:
         raise ValueError(
-            f"Insufficient paper balance ₹{balance:,.2f} for trade cost ₹{cost:,.2f}."
+            f"Insufficient paper balance ₹{balance:,.2f} for trade cost ₹{total_cost:,.2f} (incl. 0.03% brokerage)."
         )
+
+    # ── Daily loss limit check ──────────────────────────────────────────────
+    await _enforce_daily_loss_limit(session, user_id)
 
     now_ts   = _now()
     trade_id = uuid.uuid4()
@@ -200,12 +251,13 @@ async def open_trade(
                    updated_at   = :now
             WHERE  user_id = :uid
         """),
-        {"cost": float(cost), "now": now_ts, "uid": str(user_id)},
+        {"cost": float(total_cost), "now": now_ts, "uid": str(user_id)},
     )
 
     await session.commit()
     return {"id": str(trade_id), "symbol": symbol, "direction": direction,
-            "qty": qty, "entry_price": float(entry_price), "cost": float(cost)}
+            "qty": qty, "entry_price": float(entry_price), "cost": float(cost),
+            "brokerage": float(brokerage)}
 
 
 async def close_trade(
@@ -253,10 +305,14 @@ async def close_trade(
     else:
         pnl = (entry_price - exit_price) * qty
 
+    # Deduct exit brokerage
+    exit_brokerage = exit_price * qty * _BROKERAGE_PCT
+    pnl = pnl - exit_brokerage
+
     entry_value = entry_price * qty
     pnl_pct     = (pnl / entry_value * 100) if entry_value else Decimal("0")
     now_ts      = _now()
-    proceeds    = entry_value + pnl    # cash returned on close
+    proceeds    = entry_value + pnl    # cash returned on close (already net of brokerage)
 
     await session.execute(
         text("""
@@ -299,7 +355,11 @@ async def close_trade(
 
 
 async def get_summary(session: AsyncSession, *, user_id: uuid.UUID) -> dict:
-    """Return aggregated portfolio stats for a user."""
+    """Return aggregated portfolio stats for a user.
+
+    open_value is computed from current market prices (fetched from the screener
+    cache or yfinance) rather than entry prices, so unrealized P&L is visible.
+    """
     balance_row = await session.execute(
         text("SELECT paper_balance FROM user_settings WHERE user_id = :uid"),
         {"uid": str(user_id)},
@@ -311,7 +371,6 @@ async def get_summary(session: AsyncSession, *, user_id: uuid.UUID) -> dict:
         text("""
             SELECT
                 COUNT(*) FILTER (WHERE status = 'open')                     AS open_positions,
-                COALESCE(SUM(qty * entry_price) FILTER (WHERE status = 'open'), 0) AS open_value,
                 COALESCE(SUM(pnl) FILTER (WHERE status != 'open'), 0)        AS realized_pnl,
                 COUNT(*) FILTER (WHERE status != 'open')                     AS closed_trades,
                 COUNT(*)                                                      AS total_trades,
@@ -323,17 +382,51 @@ async def get_summary(session: AsyncSession, *, user_id: uuid.UUID) -> dict:
     )
     r = stats.first()
     open_positions = int(r[0] or 0)
-    open_value     = Decimal(str(r[1] or 0))
-    realized_pnl   = Decimal(str(r[2] or 0))
-    closed_trades  = int(r[3] or 0)
-    total_trades   = int(r[4] or 0)
-    wins           = int(r[5] or 0)
+    realized_pnl   = Decimal(str(r[1] or 0))
+    closed_trades  = int(r[2] or 0)
+    total_trades   = int(r[3] or 0)
+    wins           = int(r[4] or 0)
     win_rate       = round(wins / closed_trades * 100, 1) if closed_trades > 0 else None
+
+    # Compute unrealized P&L (open_value at current prices)
+    open_value = Decimal("0")
+    unrealized_pnl = Decimal("0")
+
+    if open_positions > 0:
+        open_trades = await session.execute(
+            text("""
+                SELECT symbol, direction, qty, entry_price
+                FROM   paper_trades
+                WHERE  user_id = :uid AND status = 'open'
+            """),
+            {"uid": str(user_id)},
+        )
+        rows = open_trades.fetchall()
+
+        # Fetch current prices
+        symbols = list({row[0] for row in rows})
+        price_map = {}
+        try:
+            from app.services.price_service import get_latest_prices
+            price_map = await get_latest_prices(symbols)
+        except Exception:
+            pass
+
+        for symbol, direction, qty, entry_p in rows:
+            entry_p = Decimal(str(entry_p))
+            current = Decimal(str(price_map.get(symbol, float(entry_p))))
+            position_value = current * qty
+            open_value += position_value
+            if direction == "BUY":
+                unrealized_pnl += (current - entry_p) * qty
+            else:
+                unrealized_pnl += (entry_p - current) * qty
 
     return {
         "cash_balance":   cash_balance,
         "open_positions": open_positions,
         "open_value":     open_value,
+        "unrealized_pnl": unrealized_pnl,
         "realized_pnl":   realized_pnl,
         "total_trades":   total_trades,
         "closed_trades":  closed_trades,

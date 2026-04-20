@@ -32,6 +32,7 @@ export default function OrderModal({ defaults, onClose }: Props) {
   const [orderType, setOrderType]     = useState<'MARKET' | 'LIMIT'>('LIMIT')
   const [productType, setProductType] = useState<'DELIVERY' | 'INTRADAY'>('DELIVERY')
   const [notes, setNotes]             = useState('')
+  const [showLiveConfirm, setShowLiveConfirm] = useState(false)
 
   useEffect(() => {
     if (!defaults) return
@@ -94,8 +95,17 @@ export default function OrderModal({ defaults, onClose }: Props) {
       toast.error('Enter a valid entry price')
       return
     }
-    if (isPaper) paperMutation.mutate()
-    else         liveMutation.mutate()
+    if (isPaper) {
+      paperMutation.mutate()
+    } else {
+      // Show confirmation dialog for live orders
+      setShowLiveConfirm(true)
+    }
+  }
+
+  const handleLiveConfirm = () => {
+    setShowLiveConfirm(false)
+    liveMutation.mutate()
   }
 
   return (
@@ -103,7 +113,7 @@ export default function OrderModal({ defaults, onClose }: Props) {
       style={{ position: 'fixed', inset: 0, zIndex: 1001, background: 'rgba(0,0,0,0.75)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}
       onClick={e => { if (e.target === e.currentTarget) onClose() }}
     >
-      <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 16, width: '100%', maxWidth: 480 }}>
+      <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 16, width: '100%', maxWidth: 480, position: 'relative', overflow: 'hidden' }}>
 
         {/* Header */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 20px', borderBottom: '1px solid var(--border)' }}>
@@ -213,6 +223,49 @@ export default function OrderModal({ defaults, onClose }: Props) {
               : `${modeLabel} ${direction} — ${qty} × ${sym}`}
           </button>
         </form>
+
+        {/* Live order confirmation overlay */}
+        {showLiveConfirm && (
+          <div style={{
+            position:'absolute', inset:0, background:'rgba(0,0,0,0.85)',
+            borderRadius:16, display:'flex', alignItems:'center', justifyContent:'center',
+            padding:24,
+          }}>
+            <div style={{ textAlign:'center', maxWidth:320 }}>
+              <div style={{ fontSize:32, marginBottom:12 }}>⚠️</div>
+              <div style={{ fontWeight:700, fontSize:16, marginBottom:8, color:'var(--yellow)' }}>
+                Confirm Live Order
+              </div>
+              <div style={{ fontSize:13, color:'var(--text-muted)', marginBottom:6 }}>
+                You are about to place a <strong>REAL</strong> order with your broker:
+              </div>
+              <div style={{
+                background:'var(--bg-hover)', borderRadius:8, padding:'12px 16px',
+                margin:'12px 0 20px', textAlign:'left', fontSize:13,
+                border:'1px solid var(--border)',
+              }}>
+                <div><strong>{direction}</strong> {qty} × {sym}</div>
+                <div>Price: ₹{entryPrice} ({orderType})</div>
+                <div>Est. value: ₹{(qty * parseFloat(entryPrice || '0')).toLocaleString('en-IN')}</div>
+              </div>
+              <div style={{ fontSize:12, color:'var(--red)', marginBottom:18 }}>
+                This will use real money. This action cannot be undone.
+              </div>
+              <div style={{ display:'flex', gap:10, justifyContent:'center' }}>
+                <button className="btn btn-outline" onClick={() => setShowLiveConfirm(false)}>
+                  Cancel
+                </button>
+                <button
+                  className="btn"
+                  onClick={handleLiveConfirm}
+                  style={{ background:'var(--red)', color:'#fff', border:'none' }}
+                >
+                  Confirm Order
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )

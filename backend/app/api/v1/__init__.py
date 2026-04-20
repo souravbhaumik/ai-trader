@@ -1,6 +1,6 @@
-from fastapi import APIRouter
+﻿from fastapi import APIRouter
 
-from app.api.v1 import auth, forecasts, health, logos, news, portfolio, live_portfolio, prices, screener, signals, settings, broker_creds, ws, webhooks
+from app.api.v1 import auth, forecasts, health, logos, mobile, news, portfolio, live_portfolio, prices, screener, signals, settings, broker_creds, ws, webhooks
 from app.api.v1.admin import users as admin_users
 from app.api.v1.admin import pipeline as admin_pipeline
 from app.api.v1.admin import browser as admin_browser
@@ -23,3 +23,4 @@ router.include_router(live_portfolio.router)
 router.include_router(forecasts.router)
 router.include_router(ws.router)
 router.include_router(webhooks.router)
+router.include_router(mobile.router)

@@ -1,4 +1,4 @@
-"""Request/response logging middleware with sensitive-data redaction."""
+﻿"""Request/response logging middleware with sensitive-data redaction."""
 from __future__ import annotations
 
 import time

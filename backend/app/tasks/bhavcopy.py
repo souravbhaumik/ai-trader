@@ -1,4 +1,4 @@
-"""NSE Bhavcopy daily OHLCV ingestion task.
+﻿"""NSE Bhavcopy daily OHLCV ingestion task.
 
 Downloads the official NSE Equity Bhavcopy ZIP from the NSE archives,
 extracts OHLCV data for EQ-series symbols, and upserts into ohlcv_daily.
@@ -17,9 +17,7 @@ Admin can also trigger manually from the admin panel.
 """
 from __future__ import annotations
 
-import io
 import time
-import zipfile
 from datetime import date, datetime
 
 import structlog
@@ -27,79 +25,15 @@ from sqlalchemy import text
 
 from app.core.database import get_sync_session
 from app.tasks.celery_app import celery_app
+from app.tasks.nse_utils import bhavcopy_archive_url, download_bhavcopy_zip
 from app.tasks.task_utils import clear_task_logs, now_iso, write_task_status
 
 logger = structlog.get_logger(__name__)
 
-_NSE_ARCHIVE_BASE  = "https://archives.nseindia.com/content/historical/EQUITIES"
 _MAX_RETRIES       = 4
 _RETRY_WAIT_SECS   = 15 * 60   # 15 minutes
-_REQUEST_TIMEOUT   = 30        # seconds
 
 _TASK_NAME = "bhavcopy"
-
-
-def _bhavcopy_url(trade_date: date) -> str:
-    """Build the NSE archive URL for the given trade date."""
-    dd   = trade_date.strftime("%d")
-    mon  = trade_date.strftime("%b").upper()
-    yyyy = trade_date.strftime("%Y")
-    return f"{_NSE_ARCHIVE_BASE}/{yyyy}/{mon}/cm{dd}{mon}{yyyy}bhav.csv.zip"
-
-
-def _download_df(trade_date: date):
-    """Download and parse the Bhavcopy ZIP.  Returns a DataFrame or None."""
-    import pandas as pd
-    import requests
-
-    url     = _bhavcopy_url(trade_date)
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Referer":          "https://www.nseindia.com/market-data/securities-available-for-trading",
-        "Accept":           "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language":  "en-US,en;q=0.9",
-        "Accept-Encoding":  "gzip, deflate, br",
-        "DNT":              "1",
-        "Connection":       "keep-alive",
-    }
-
-    try:
-        resp = requests.get(url, headers=headers, timeout=_REQUEST_TIMEOUT)
-        if resp.status_code == 404:
-            logger.warning("bhavcopy.not_found", url=url)
-            return None
-        resp.raise_for_status()
-    except Exception as exc:
-        logger.warning("bhavcopy.request_failed", error=str(exc))
-        return None
-
-    try:
-        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
-            with zf.open(zf.namelist()[0]) as f:
-                df = pd.read_csv(f)
-    except Exception as exc:
-        logger.warning("bhavcopy.parse_failed", error=str(exc))
-        return None
-
-    # Validate: the CSV's internal TIMESTAMP must match the expected trade date
-    if "TIMESTAMP" in df.columns and not df.empty:
-        try:
-            csv_date = pd.to_datetime(df["TIMESTAMP"].iloc[0]).date()
-            if csv_date != trade_date:
-                logger.warning(
-                    "bhavcopy.stale_date",
-                    expected=str(trade_date),
-                    got=str(csv_date),
-                )
-                return None
-        except Exception:
-            pass  # If date parse fails, proceed with the data
-
-    return df
 
 
 @celery_app.task(name="app.tasks.bhavcopy.ingest_bhavcopy")
@@ -128,16 +62,16 @@ def ingest_bhavcopy(trade_date_str: str | None = None) -> dict:
     holiday_skip = False
     df = None
     for attempt in range(1, _MAX_RETRIES + 1):
-        url = _bhavcopy_url(trade_date)
+        url = bhavcopy_archive_url(trade_date)
         try:
             _probe = _req.head(url, timeout=10)
             if _probe.status_code == 404:
                 holiday_skip = True
                 break          # no point retrying — NSE won't publish on a holiday
         except Exception:
-            pass               # fall through to _download_df which logs the error
+            pass               # fall through to download which logs the error
 
-        df = _download_df(trade_date)
+        df = download_bhavcopy_zip(trade_date)
         if df is not None:
             break
         if attempt < _MAX_RETRIES:
@@ -182,10 +116,10 @@ def ingest_bhavcopy(trade_date_str: str | None = None) -> dict:
                 session.execute(
                     text("""
                         INSERT INTO ohlcv_daily
-                            (symbol, date, open, high, low, close, volume, source)
+                            (symbol, ts, open, high, low, close, volume, source)
                         VALUES
                             (:sym, :dt, :o, :h, :l, :c, :v, 'bhavcopy')
-                        ON CONFLICT (symbol, date) DO UPDATE SET
+                        ON CONFLICT (symbol, ts) DO UPDATE SET
                             open   = EXCLUDED.open,
                             high   = EXCLUDED.high,
                             low    = EXCLUDED.low,
@@ -206,7 +140,7 @@ def ingest_bhavcopy(trade_date_str: str | None = None) -> dict:
                 inserted += 1
             except Exception as exc:
                 errors += 1
-                logger.debug("bhavcopy.row_error", symbol=row.get("symbol"), error=str(exc))
+                logger.debug("bhavcopy.row_error", symbol=row.get("symbol"), err=str(exc))
 
         session.commit()
 

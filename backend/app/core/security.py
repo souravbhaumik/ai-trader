@@ -1,4 +1,4 @@
-"""JWT, bcrypt, TOTP, and Fernet helpers."""
+﻿"""JWT, bcrypt, TOTP, and Fernet helpers."""
 from __future__ import annotations
 
 import hashlib

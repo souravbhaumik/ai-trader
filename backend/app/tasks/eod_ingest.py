@@ -1,18 +1,23 @@
-"""EOD data ingestion task — runs daily at 4:30 PM IST on market days.
+﻿"""EOD data ingestion task — runs daily at 4:30 PM IST on market days.
 
-Downloads the latest day's OHLCV for all active symbols via yfinance
-and upserts into ohlcv_daily. Uses the shared SQLAlchemy sync engine so
-Celery workers participate in the same connection pool as the application.
+Downloads the latest day's OHLCV for all active symbols.
+
+Primary source: NSE Bhavcopy (official NSE end-of-day CSV, authoritative Indian
+market data, no rate limits, symbols match our DB format exactly).
+Fallback: yfinance (used if NSE Bhavcopy is unavailable).
 """
 from __future__ import annotations
 
 import time
+from datetime import datetime, timedelta
+from typing import Dict, Optional
 
 import structlog
 from sqlalchemy import text
 
 from app.core.database import get_sync_session
 from app.tasks.celery_app import celery_app
+from app.tasks.nse_utils import try_sec_bhav_with_lookback
 from app.tasks.task_utils import (
     append_task_log, clear_task_logs, now_iso, write_task_status,
 )
@@ -26,10 +31,10 @@ _DELAY_SECS = 2.0
 
 @celery_app.task(name="app.tasks.eod_ingest.ingest_eod")
 def ingest_eod():
-    """Fetch the latest OHLCV day for all active symbols and upsert into ohlcv_daily."""
-    import pandas as pd
-    import yfinance as yf
+    """Fetch the latest OHLCV day for all active symbols and upsert into ohlcv_daily.
 
+    Tries NSE Bhavcopy first; falls back to yfinance if unavailable.
+    """
     started = now_iso()
     clear_task_logs(_TASK)
     write_task_status(_TASK, "running", "EOD ingest started.", started_at=started)
@@ -45,35 +50,76 @@ def ingest_eod():
         ]
 
         append_task_log(_TASK, f"Loaded {len(symbols)} active symbols from DB.")
-        write_task_status(_TASK, "running", f"Fetching OHLCV for {len(symbols)} symbols…", started_at=started)
+        write_task_status(
+            _TASK, "running", f"Fetching OHLCV for {len(symbols)} symbols…",
+            started_at=started,
+        )
 
+        # ── 1. Try NSE Bhavcopy (primary) ─────────────────────────────────────
+        append_task_log(_TASK, "Attempting NSE Bhavcopy download…")
+        nse_data = try_sec_bhav_with_lookback()
         total_inserted = 0
+
+        if nse_data:
+            append_task_log(_TASK, f"NSE Bhavcopy fetched — {len(nse_data)} EQ rows.")
+            rows = [nse_data[sym] for sym in symbols if sym in nse_data]
+
+            if rows:
+                session.execute(
+                    text("""
+                        INSERT INTO ohlcv_daily
+                            (symbol, ts, open, high, low, close, volume, source)
+                        VALUES
+                            (:symbol, :ts, :open, :high, :low, :close, :volume, :source)
+                        ON CONFLICT (symbol, ts) DO UPDATE SET
+                            open   = EXCLUDED.open,
+                            high   = EXCLUDED.high,
+                            low    = EXCLUDED.low,
+                            close  = EXCLUDED.close,
+                            volume = EXCLUDED.volume,
+                            source = EXCLUDED.source
+                    """),
+                    rows,
+                )
+                session.commit()
+                total_inserted = len(rows)
+                msg = f"NSE Bhavcopy: {total_inserted}/{len(symbols)} symbols ingested."
+                append_task_log(_TASK, msg)
+                write_task_status(
+                    _TASK, "done", msg,
+                    started_at=started, finished_at=now_iso(),
+                    summary={"inserted": total_inserted, "source": "nse"},
+                )
+                return {"status": "done", "source": "nse", "inserted": total_inserted}
+
+        # ── 2. Fallback: yfinance ─────────────────────────────────────────────
+        append_task_log(_TASK, "NSE Bhavcopy unavailable — falling back to yfinance.")
+        import pandas as pd
+        import yfinance as yf
+
         n_batches = (len(symbols) + _BATCH_SIZE - 1) // _BATCH_SIZE
 
         for batch_idx, i in enumerate(range(0, len(symbols), _BATCH_SIZE)):
             batch = symbols[i: i + _BATCH_SIZE]
+            # yfinance expects .NS suffix for NSE symbols
+            yf_batch = [f"{s}.NS" for s in batch]
+            sym_map = dict(zip(yf_batch, batch))  # yf_sym → plain sym
             try:
                 data = yf.download(
-                    batch, period="5d", interval="1d",
+                    yf_batch, period="5d", interval="1d",
                     progress=False, auto_adjust=True, threads=True,
                 )
                 if data is None or data.empty:
                     continue
 
-                # ── Normalise MultiIndex shape ─────────────────────────────────
                 if not isinstance(data.columns, pd.MultiIndex):
                     if len(batch) == 1:
-                        sym_name = batch[0]
-                        data = pd.concat({sym_name: data}, axis=1).swaplevel(axis=1)
+                        yf_sym = yf_batch[0]
+                        data = pd.concat({yf_sym: data}, axis=1).swaplevel(axis=1)
                         data.columns = pd.MultiIndex.from_tuples(
-                            [(pt, sym_name) for pt in data.columns.get_level_values(0)]
+                            [(pt, yf_sym) for pt in data.columns.get_level_values(0)]
                         )
                     else:
-                        logger.warning(
-                            "eod_batch_flat_result_skipped",
-                            batch_preview=batch[:3],
-                            reason="non-MultiIndex for multi-sym batch",
-                        )
                         continue
 
                 close_df = data["Close"]
@@ -83,15 +129,15 @@ def ingest_eod():
                 vol_df   = data["Volume"]
 
                 rows = []
-                for sym in batch:
+                for yf_sym, plain_sym in sym_map.items():
                     try:
-                        if sym not in close_df.columns:
+                        if yf_sym not in close_df.columns:
                             continue
-                        c = close_df[sym]; o = open_df[sym]
-                        h = high_df[sym]; lo = low_df[sym]; v = vol_df[sym]
+                        c = close_df[yf_sym]; o = open_df[yf_sym]
+                        h = high_df[yf_sym]; lo = low_df[yf_sym]; v = vol_df[yf_sym]
                         latest_ts = c.dropna().index[-1]
                         rows.append({
-                            "symbol": sym,
+                            "symbol": plain_sym,
                             "ts":     latest_ts.to_pydatetime().replace(tzinfo=None),
                             "open":   float(o.get(latest_ts, c.iloc[-1])),
                             "high":   float(h.get(latest_ts, c.iloc[-1])),
@@ -118,10 +164,8 @@ def ingest_eod():
                     )
                     session.commit()
                     total_inserted += len(rows)
-
             except Exception as exc:
-                logger.error("eod_batch_error", error=str(exc))
-                append_task_log(_TASK, f"Batch {batch_idx+1}/{n_batches} error: {exc}", level="error")
+                logger.warning("eod_batch_failed", batch_preview=batch[:3], err=str(exc))
 
             if (batch_idx + 1) % 5 == 0 or batch_idx == n_batches - 1:
                 write_task_status(
@@ -131,11 +175,11 @@ def ingest_eod():
                 )
             time.sleep(_DELAY_SECS)
 
-        msg = f"EOD ingest done — {total_inserted} rows upserted across {len(symbols)} symbols."
-        logger.info("eod_ingest_done", inserted=total_inserted)
+        msg = f"yfinance fallback: {total_inserted} rows upserted across {len(symbols)} symbols."
+        logger.info("eod_ingest_done", inserted=total_inserted, source="yfinance")
         write_task_status(
             _TASK, "done", msg,
             started_at=started, finished_at=now_iso(),
-            summary={"inserted": total_inserted, "symbols": len(symbols)},
+            summary={"inserted": total_inserted, "source": "yfinance"},
         )
-        return {"status": "done", "inserted": total_inserted}
+        return {"status": "done", "source": "yfinance", "inserted": total_inserted}

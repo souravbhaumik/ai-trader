@@ -1,4 +1,4 @@
-"""Celery task for retrying broker order-update webhook writes.
+﻿"""Celery task for retrying broker order-update webhook writes.
 
 Used when a postback arrives before the originating FastAPI thread has committed
 the live_orders INSERT (race condition with fast market order fills).

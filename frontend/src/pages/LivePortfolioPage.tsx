@@ -196,6 +196,7 @@ export default function LivePortfolioPage() {
     queryFn: () => apiClient.get('/portfolio/live/positions').then(r => r.data),
     enabled: tradingMode === 'live',
     retry: false,
+    refetchInterval: 15_000,
   })
 
   const { data: holdings = [], isLoading: holdLoading, refetch: refetchHold } = useQuery<LivePosition[]>({
@@ -203,6 +204,7 @@ export default function LivePortfolioPage() {
     queryFn: () => apiClient.get('/portfolio/live/holdings').then(r => r.data),
     enabled: tradingMode === 'live',
     retry: false,
+    refetchInterval: 30_000,
   })
 
   const { data: orders = [], isLoading: ordLoading, refetch: refetchOrd } = useQuery<LiveOrder[]>({
@@ -210,6 +212,7 @@ export default function LivePortfolioPage() {
     queryFn: () => apiClient.get('/portfolio/live/orders?limit=50').then(r => r.data),
     enabled: tradingMode === 'live',
     retry: false,
+    refetchInterval: 15_000,
   })
 
   const cancelMutation = useMutation({
@@ -242,17 +245,13 @@ export default function LivePortfolioPage() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20, padding: '0 0 32px' }}>
 
-      {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <div>
-          <h2 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
-            <Zap size={20} style={{ color: 'var(--accent)' }} /> Live Portfolio
-          </h2>
-          <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 13 }}>
-            Real positions and orders via Angel One
-          </p>
+      {/* Page Header */}
+      <div className="page-header">
+        <div className="page-header-left">
+          <div className="page-header-title">Live Portfolio</div>
+          <div className="page-header-sub">Real positions and orders via Angel One</div>
         </div>
-        <div style={{ display: 'flex', gap: 8 }}>
+        <div className="page-header-actions">
           <button
             className="btn-outline btn"
             onClick={() => { refetchPos(); refetchHold(); refetchOrd() }}

@@ -1,4 +1,4 @@
-"""WebSocket endpoints for live price and signal streaming.
+﻿"""WebSocket endpoints for live price and signal streaming.
 
 Price URL:  ``ws://<host>/api/v1/ws/prices?token=<jwt>&symbols=RELIANCE.NS,TCS.NS``
 Signal URL: ``ws://<host>/api/v1/ws/signals?token=<jwt>``
@@ -7,8 +7,12 @@ Architecture (prices)
 ---------------------
 * A **single** background asyncio task (``price_broadcaster``) runs for the
   lifetime of the FastAPI process. Every ``PUSH_INTERVAL_SECS`` seconds it
-  collects all unique symbols across every active connection, fetches prices
-  from yfinance **once**, and fans the results into each connection's queue.
+  collects all unique symbols across every active connection and fans price
+  updates to each connection's queue.
+
+  Live price fetching is disabled until the shared credential pool is
+  implemented (DESIGN.md §22). The broadcaster sends no price frames until
+  then; clients retain their last-known values.
 
 Architecture (signals)
 ----------------------
@@ -22,7 +26,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from typing import Dict, List, Set, Tuple
 
 import structlog
@@ -115,33 +118,17 @@ manager = ConnectionManager()
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _fetch_prices_sync(symbols: list) -> list:
-    """Fetch the latest price for each symbol via yfinance (sync, thread-safe)."""
+    """Fetch live prices via the shared broker credential pool."""
     try:
-        import yfinance as yf  # type: ignore
-    except ImportError:
-        return []
+        from app.brokers.credential_pool import get_quotes_batch_via_pool
 
-    result = []
-    for sym in symbols:
-        try:
-            fi      = yf.Ticker(sym).fast_info
-            price   = getattr(fi, "last_price", None)
-            prev_cl = getattr(fi, "previous_close", None)
-            if price is None:
-                continue
-            change_pct = (
-                round((price - prev_cl) / prev_cl * 100, 2)
-                if prev_cl and prev_cl != 0 else 0.0
-            )
-            result.append({
-                "symbol":     sym,
-                "price":      round(float(price), 2),
-                "change_pct": change_pct,
-                "ts":         int(time.time()),
-            })
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("ws.fetch_skip", symbol=sym, error=str(exc))
-    return result
+        normalized = [str(s).upper().strip() for s in symbols if str(s).strip()]
+        if not normalized:
+            return []
+        return get_quotes_batch_via_pool(normalized)
+    except Exception as exc:
+        logger.warning("ws.pool_price_fetch_failed", err=str(exc))
+        return []
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -154,7 +141,7 @@ async def price_broadcaster() -> None:
     Called once from ``app.main.lifespan``; runs for the process lifetime.
     Sleeps first so the first fetch happens after clients have connected.
     """
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     while True:
         await asyncio.sleep(_PUSH_INTERVAL_SECS)
         try:
@@ -165,7 +152,7 @@ async def price_broadcaster() -> None:
             if prices:
                 await manager.broadcast(prices)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("price_broadcaster.error", error=str(exc))
+            logger.warning("price_broadcaster.error", err=str(exc))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -238,7 +225,7 @@ async def ws_prices(
     except WebSocketDisconnect:
         logger.info("ws.prices.disconnected", user_id=user_id)
     except Exception as exc:
-        logger.error("ws.prices.error", user_id=user_id, error=str(exc))
+        logger.error("ws.prices.error", user_id=user_id, err=str(exc))
         try:
             await websocket.close(code=1011)
         except Exception:
@@ -317,7 +304,7 @@ async def signal_broadcaster() -> None:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.warning("signal_broadcaster.error_reconnecting", error=str(exc))
+            logger.warning("signal_broadcaster.error_reconnecting", err=str(exc))
             await asyncio.sleep(3)  # brief back-off before reconnecting
 
 
@@ -372,7 +359,7 @@ async def ws_signals(
     except WebSocketDisconnect:
         logger.info("ws.signals.disconnected", user_id=user_id)
     except Exception as exc:
-        logger.error("ws.signals.error", user_id=user_id, error=str(exc))
+        logger.error("ws.signals.error", user_id=user_id, err=str(exc))
         try:
             await websocket.close(code=1011)
         except Exception:

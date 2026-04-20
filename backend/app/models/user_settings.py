@@ -1,4 +1,4 @@
-﻿"""UserSettings SQLModel — maps to the `user_settings` table."""
+﻿"""UserSettings SQLModel � maps to the `user_settings` table."""
 from __future__ import annotations
 
 import uuid
@@ -22,6 +22,10 @@ class UserSettings(SQLModel, table=True):
     notification_orders: bool = Field(default=True)
     notification_news: bool = Field(default=True)
     preferred_broker: Optional[str] = Field(default=None, max_length=20)
+
+    # Phase 9: Market hours and sector exposure settings
+    enforce_market_hours: bool = Field(default=True)
+    max_sector_exposure_pct: Decimal = Field(default=Decimal("30.00"))
 
     updated_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None)

@@ -1,4 +1,4 @@
-﻿"""Signal SQLModel — maps to the `signals` hypertable."""
+﻿"""Signal SQLModel � maps to the `signals` hypertable."""
 from __future__ import annotations
 
 import uuid
@@ -24,7 +24,7 @@ class Signal(SQLModel, table=True):
         default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
     )
     signal_type: str = Field(max_length=10)  # BUY / SELL / HOLD
-    confidence: Decimal = Field(default=Decimal("0"))  # 0.0 – 1.0
+    confidence: Decimal = Field(default=Decimal("0"))  # 0.0 � 1.0
     entry_price: Optional[Decimal] = Field(default=None)
     target_price: Optional[Decimal] = Field(default=None)
     stop_loss: Optional[Decimal] = Field(default=None)
@@ -34,6 +34,7 @@ class Signal(SQLModel, table=True):
         sa_column=Column(JSONB),
     )
     is_active: bool = Field(default=True)
+    explanation: Optional[str] = Field(default=None, max_length=1000)
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
     )

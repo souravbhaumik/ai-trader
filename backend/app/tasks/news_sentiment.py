@@ -1,4 +1,4 @@
-"""News sentiment ingestion task — Phase 4.
+﻿"""News sentiment ingestion task — Phase 4.
 
 Runs every 15 minutes during market hours (Mon–Fri 9:00 AM – 4:00 PM IST).
 
@@ -65,7 +65,7 @@ def fetch_news_sentiment(self):
         gn_articles = fetch_google_news(top_queries, max_per_symbol=3)
         yf_articles = fetch_yahoo_finance_news(top_names, max_per_ticker=5)
     except Exception as exc:
-        logger.warning("news_task.fetch_failed", error=str(exc))
+        logger.warning("news_task.fetch_failed", err=str(exc))
 
     all_articles: list[dict] = rss_articles + gn_articles + yf_articles
     if not all_articles:
@@ -125,7 +125,7 @@ def fetch_news_sentiment(self):
             }
         seen_keys = existing_urls | existing_headlines
     except Exception as exc:
-        logger.warning("news_task.dedup_lookup_failed", error=str(exc))
+        logger.warning("news_task.dedup_lookup_failed", err=str(exc))
         seen_keys = set()
 
     new_mapped: list[dict] = []
@@ -174,29 +174,37 @@ def fetch_news_sentiment(self):
             "created_at":  now_utc,
         })
 
-    # ── 6. Persist to DB ──────────────────────────────────────────────────────
+    # ── 6. Persist to DB (batch INSERT with dedup_hash) ─────────────────────
+    # Compute dedup_hash for each row for DB-side duplicate prevention
+    for row in rows:
+        raw_key = (row.get("url") or row["headline"]) + "||" + row["symbol"]
+        row["dedup_hash"] = hashlib.sha256(raw_key.encode("utf-8", errors="replace")).hexdigest()
+
     inserted = 0
     try:
         with get_sync_session() as session:
-            for row in rows:
+            # Batch insert — ON CONFLICT skips duplicates at DB level
+            for i in range(0, len(rows), 100):
+                batch = rows[i : i + 100]
                 try:
-                    session.execute(
+                    result = session.execute(
                         text("""
                             INSERT INTO news_sentiment
                                 (id, published_at, symbol, headline, summary, source,
-                                 url, sentiment, score, confidence, created_at)
+                                 url, sentiment, score, confidence, created_at, dedup_hash)
                             VALUES
                                 (:id, :published_at, :symbol, :headline, :summary, :source,
-                                 :url, :sentiment, :score, :confidence, :created_at)
+                                 :url, :sentiment, :score, :confidence, :created_at, :dedup_hash)
+                            ON CONFLICT (dedup_hash) DO NOTHING
                         """),
-                        row,
+                        batch,
                     )
-                    inserted += 1
+                    inserted += result.rowcount
                 except Exception as exc:
-                    logger.warning("news_task.insert_skipped", error=str(exc), row_id=row.get("id"))
+                    logger.warning("news_task.batch_insert_failed", err=str(exc), batch_size=len(batch))
             session.commit()
     except Exception as exc:
-        logger.error("news_task.db_insert_failed", error=str(exc))
+        logger.error("news_task.db_insert_failed", err=str(exc))
 
     # ── 7. Recompute rolling sentiment cache in Redis ─────────────────────────
     _update_sentiment_cache(rows, now_utc)
@@ -251,7 +259,7 @@ def _update_sentiment_cache(rows: list[dict], now_utc: datetime) -> None:
                     "published_at": db_row[3],
                 })
         except Exception as exc:
-            logger.warning("news_task.cache_db_query_failed", error=str(exc))
+            logger.warning("news_task.cache_db_query_failed", err=str(exc))
 
         for sym, sym_rows in by_symbol.items():
             total_weight = 0.0
@@ -284,4 +292,4 @@ def _update_sentiment_cache(rows: list[dict], now_utc: datetime) -> None:
 
         logger.info("news_task.cache_updated", symbols=len(by_symbol))
     except Exception as exc:
-        logger.error("news_task.cache_update_failed", error=str(exc))
+        logger.error("news_task.cache_update_failed", err=str(exc))

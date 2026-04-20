@@ -1,4 +1,4 @@
-"""Abstract broker adapter interface.
+﻿"""Abstract broker adapter interface.
 
 Every broker adapter (yfinance, Angel One, Upstox) must implement this interface.
 """

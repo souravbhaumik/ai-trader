@@ -1,13 +1,12 @@
 import { useState, useEffect } from 'react'
 import { BrowserRouter, Routes, Route, NavLink, Navigate } from 'react-router-dom'
 import { Toaster } from 'react-hot-toast'
-import { Cpu, LayoutDashboard, Activity, Settings, Terminal, BarChart2, Zap, LogOut, Briefcase, TrendingUp, BookOpen } from 'lucide-react'
+import { Cpu, LayoutDashboard, Settings, Terminal, BarChart2, Zap, LogOut, Briefcase, TrendingUp, BookOpen } from 'lucide-react'
 import { useAuthStore } from './store/authStore'
 import { apiClient } from './api/client'
 import LoginPage from './pages/LoginPage'
 import RegisterPage from './pages/RegisterPage'
 import DashboardPage from './pages/DashboardPage'
-import OpportunitiesPage from './pages/OpportunitiesPage'
 import SignalLogPage from './pages/SignalLogPage'
 import SettingsPage from './pages/SettingsPage'
 import AdminPage from './pages/AdminPage'
@@ -84,37 +83,34 @@ function AppLayout() {
         </div>
       </header>
 
-      {/* Sidebar */}
+      {/* Sidebar — icon only */}
       <nav className="sidebar">
-        <NavLink to="/" end className={({ isActive }) => `sidebar-nav-item ${isActive ? 'active' : ''}`}>
-          <LayoutDashboard size={16} /> Dashboard
+        <NavLink to="/" end className={({ isActive }) => `sidebar-nav-item ${isActive ? 'active' : ''}`} title="Dashboard">
+          <LayoutDashboard size={20} />
         </NavLink>
-        <NavLink to="/opportunities" className={({ isActive }) => `sidebar-nav-item ${isActive ? 'active' : ''}`}>
-          <Zap size={16} /> Opportunities
+        <NavLink to="/signals" className={({ isActive }) => `sidebar-nav-item ${isActive ? 'active' : ''}`} title="Signals">
+          <Zap size={20} />
         </NavLink>
-        <NavLink to="/signals" className={({ isActive }) => `sidebar-nav-item ${isActive ? 'active' : ''}`}>
-          <Activity size={16} /> Signal Log
+        <NavLink to="/screener" className={({ isActive }) => `sidebar-nav-item ${isActive ? 'active' : ''}`} title="Market Screener">
+          <BarChart2 size={20} />
         </NavLink>
-        <NavLink to="/screener" className={({ isActive }) => `sidebar-nav-item ${isActive ? 'active' : ''}`}>
-          <BarChart2 size={16} /> Market Screener
+        <NavLink to="/paper" className={({ isActive }) => `sidebar-nav-item ${isActive ? 'active' : ''}`} title="Paper Trading">
+          <BookOpen size={20} />
         </NavLink>
-        <NavLink to="/paper" className={({ isActive }) => `sidebar-nav-item ${isActive ? 'active' : ''}`}>
-          <BookOpen size={16} /> Paper Trading
+        <NavLink to="/live" className={({ isActive }) => `sidebar-nav-item ${isActive ? 'active' : ''}`} title="Live Portfolio">
+          <Briefcase size={20} />
+          {tradingMode === 'live' && <span className="sidebar-live-dot" />}
         </NavLink>
-        <NavLink to="/live" className={({ isActive }) => `sidebar-nav-item ${isActive ? 'active' : ''}`}>
-          <Briefcase size={16} /> Live Portfolio
-          {tradingMode === 'live' && <span style={{ marginLeft: 'auto', width: 8, height: 8, borderRadius: '50%', background: 'var(--green)', display: 'inline-block' }} />}
-        </NavLink>
-        <NavLink to="/forecast" className={({ isActive }) => `sidebar-nav-item ${isActive ? 'active' : ''}`}>
-          <TrendingUp size={16} /> AI Forecast
+        <NavLink to="/forecast" className={({ isActive }) => `sidebar-nav-item ${isActive ? 'active' : ''}`} title="AI Forecast">
+          <TrendingUp size={20} />
         </NavLink>
         {isAdmin() && (
-          <NavLink to="/admin" className={({ isActive }) => `sidebar-nav-item ${isActive ? 'active' : ''}`}>
-            <Terminal size={16} /> Pipeline
+          <NavLink to="/admin" className={({ isActive }) => `sidebar-nav-item ${isActive ? 'active' : ''}`} title="Pipeline">
+            <Terminal size={20} />
           </NavLink>
         )}
-        <NavLink to="/settings" className={({ isActive }) => `sidebar-nav-item ${isActive ? 'active' : ''}`}>
-          <Settings size={16} /> Settings
+        <NavLink to="/settings" className={({ isActive }) => `sidebar-nav-item ${isActive ? 'active' : ''}`} title="Settings" style={{ marginTop: 'auto' }}>
+          <Settings size={20} />
         </NavLink>
       </nav>
 
@@ -122,7 +118,7 @@ function AppLayout() {
       <main className="main-content">
         <Routes>
           <Route path="/"              element={<DashboardPage />} />
-          <Route path="/opportunities" element={<OpportunitiesPage />} />
+          <Route path="/opportunities" element={<Navigate to="/signals" replace />} />
           <Route path="/screener"      element={<ScreenerPage />} />
           <Route path="/signals"       element={<SignalLogPage />} />
           <Route path="/paper"         element={<PaperTradingPage />} />

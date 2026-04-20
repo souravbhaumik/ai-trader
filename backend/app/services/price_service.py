@@ -1,4 +1,4 @@
-"""Price service — thin orchestration layer between API and broker adapters.
+﻿"""Price service — thin orchestration layer between API and broker adapters.
 
 Handles caching in Redis (60-second TTL for quotes, 5-min for indices)
 so rapid API calls don't hammer the underlying data source.
@@ -21,7 +21,10 @@ _HISTORY_TTL  = 300  # 5 minutes
 
 
 async def get_quote(adapter: BrokerAdapter, symbol: str) -> Optional[Quote]:
-    cache_key = f"quote:{adapter.broker_name}:{symbol}"
+    if adapter.broker_name == "angel_one":
+        cache_key = f"shared:quote:{symbol}"
+    else:
+        cache_key = f"quote:{adapter.broker_name}:{symbol}"
     try:
         redis = get_redis()
     except RuntimeError:
@@ -45,6 +48,36 @@ async def get_quote(adapter: BrokerAdapter, symbol: str) -> Optional[Quote]:
 
 
 async def get_quotes_batch(adapter: BrokerAdapter, symbols: List[str]) -> List[Quote]:
+    try:
+        redis = get_redis()
+    except RuntimeError:
+        redis = None
+
+    # Shared cache for Angel One to reduce duplicate calls across users.
+    if adapter.broker_name == "angel_one" and redis:
+        out: List[Quote] = []
+        missing: List[str] = []
+        for symbol in symbols:
+            key = f"shared:quote:{symbol}"
+            cached = await redis.get(key)
+            if cached:
+                try:
+                    out.append(Quote(**json.loads(cached)))
+                    continue
+                except Exception:
+                    pass
+            missing.append(symbol)
+
+        if missing:
+            fetched = await adapter.get_quotes_batch(missing)
+            for quote in fetched:
+                out.append(quote)
+                try:
+                    await redis.setex(f"shared:quote:{quote.symbol}", _QUOTE_TTL, json.dumps(quote.__dict__))
+                except Exception:
+                    pass
+        return out
+
     return await adapter.get_quotes_batch(symbols)
 
 

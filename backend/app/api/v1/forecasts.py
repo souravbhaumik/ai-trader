@@ -1,4 +1,4 @@
-"""Forecast API — Phase 5.
+﻿"""Forecast API — Phase 5.
 
 Endpoints
 ---------
@@ -15,39 +15,17 @@ from typing import Any, Optional
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from jose import JWTError
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_session
-from app.core.security import decode_access_token
+from app.api.v1.deps import get_current_user, require_admin
+from app.models.user import User
 
 logger = structlog.get_logger(__name__)
 
 router = APIRouter(tags=["forecasts"])
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  Auth helpers
-# ══════════════════════════════════════════════════════════════════════════════
-
-async def _get_current_user(request: Request) -> dict:
-    auth_hdr = request.headers.get("Authorization", "")
-    if not auth_hdr.startswith("Bearer "):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing bearer token.")
-    token = auth_hdr.removeprefix("Bearer ").strip()
-    try:
-        return decode_access_token(token)
-    except JWTError:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired token.")
-
-
-async def _require_admin(request: Request) -> dict:
-    payload = await _get_current_user(request)
-    if payload.get("role") != "admin":
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin role required.")
-    return payload
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -67,12 +45,14 @@ async def _fetch_bars(
                 SELECT close, high, low, volume
                 FROM   ohlcv_daily
                 WHERE  symbol = :symbol
-                ORDER  BY ts ASC
+                ORDER  BY ts DESC
                 LIMIT  :limit
             """),
             {"symbol": clean, "limit": limit},
         )
     ).fetchall()
+    # Reverse so bars are oldest → newest (bars[-1] = most recent close)
+    rows = list(reversed(rows))
     return [
         {
             "close":  float(r[0]),
@@ -82,6 +62,50 @@ async def _fetch_bars(
         }
         for r in rows
     ]
+
+
+async def _fetch_live_bars(
+    symbol: str,
+    user_id: str,
+    db: AsyncSession,
+    limit: int = 120,
+) -> list[dict]:
+    """Fetch fresh OHLCV bars from the user's configured broker (oldest→newest).
+
+    Uses the user's personal Angel One (or other broker) credentials from the
+    broker_credentials table. Falls back to [] if the user has no broker
+    configured or the call fails — the caller then falls through to DB bars.
+    """
+    clean = symbol.upper().split(".")[0]
+    try:
+        from app.brokers.factory import get_adapter_for_user  # noqa: PLC0415
+        from sqlmodel import select  # noqa: PLC0415
+        from app.models.user_settings import UserSettings  # noqa: PLC0415
+
+        result = await db.execute(
+            select(UserSettings).where(UserSettings.user_id == user_id)  # type: ignore[arg-type]
+        )
+        settings_row = result.scalar_one_or_none()
+        preferred_broker = settings_row.preferred_broker if settings_row else None
+
+        adapter = await get_adapter_for_user(user_id, preferred_broker, db)
+        # If we got a pure yfinance adapter there's no point duplicating the DB-bars
+        # path — just return [] and let the caller use the DB fallback.
+        from app.brokers.yfinance_adapter import YFinanceAdapter  # noqa: PLC0415
+        if isinstance(adapter, YFinanceAdapter):
+            return []
+
+        bars_raw = await adapter.get_history(clean, period="1y", interval="1d")
+        if not bars_raw:
+            return []
+        # OHLCVBar objects → dicts, take last `limit` bars (oldest→newest)
+        return [
+            {"close": b.close, "high": b.high, "low": b.low, "volume": b.volume}
+            for b in bars_raw[-limit:]
+        ]
+    except Exception as exc:
+        logger.warning("live_bars_fetch_failed", symbol=clean, err=str(exc))
+        return []
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -129,16 +153,20 @@ class DLModelRow(BaseModel):
 @router.get("/forecasts/{symbol}", response_model=ForecastResponse)
 async def get_forecast(
     symbol:  str,
-    request: Request,
+    user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ):
     """5-day ahead TFT price forecast for a symbol.
 
     Requires an active TFT model (see ``POST /admin/models/download-from-drive``).
     """
-    await _get_current_user(request)
+    user_id: str = str(user.id)
 
-    bars = await _fetch_bars(symbol, session, limit=120)
+    # Prefer live bars from user's broker so base_price reflects today's price;
+    # fall back to ohlcv_daily (DB) if broker is not configured or call fails.
+    bars = await _fetch_live_bars(symbol, user_id, session, limit=120)
+    if len(bars) < 82:
+        bars = await _fetch_bars(symbol, session, limit=120)
     if len(bars) < 82:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -162,16 +190,19 @@ async def get_forecast(
 @router.get("/forecasts/{symbol}/anomaly", response_model=AnomalyResponse)
 async def get_anomaly(
     symbol:  str,
-    request: Request,
+    user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ):
     """LSTM reconstruction-error anomaly score for a symbol.
 
     score > 1.0  indicates unusual market behaviour for the symbol.
     """
-    await _get_current_user(request)
+    user_id: str = str(user.id)
 
-    bars = await _fetch_bars(symbol, session, limit=80)
+    # Prefer live bars from user's broker; fall back to ohlcv_daily if unavailable.
+    bars = await _fetch_live_bars(symbol, user_id, session, limit=80)
+    if len(bars) < 51:
+        bars = await _fetch_bars(symbol, session, limit=80)
     if len(bars) < 51:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -205,7 +236,7 @@ async def download_models_from_drive(
 
     Requires ``LSTM_GDRIVE_ID`` and/or ``TFT_GDRIVE_ID`` environment variables.
     """
-    await _require_admin(request)
+    await require_admin(request, session)
 
     proc = await asyncio.create_subprocess_exec(
         sys.executable, "/app/scripts/download_models.py",
@@ -238,7 +269,7 @@ async def list_dl_models(
     session: AsyncSession = Depends(get_session),
 ):
     """List all LSTM and TFT model versions registered in ml_models (admin only)."""
-    await _require_admin(request)
+    await require_admin(request, session)
 
     rows = (
         await session.execute(

@@ -1,4 +1,4 @@
-"""yfinance broker adapter — free NSE fallback.
+﻿"""yfinance broker adapter — free NSE fallback.
 
 Uses Yahoo Finance (15-min delayed during market hours, free, no API key).
 All network calls run in a thread pool to avoid blocking the async event loop.
@@ -67,12 +67,12 @@ _yf_retry = retry(
 
 # Nifty indices as Yahoo Finance symbols
 _INDICES = {
-    "^NSEI":     "Nifty 50",
-    "^BSESN":    "Sensex",
-    "^NSEBANK":  "Bank Nifty",
-    "NIFTYIT.NS":  "Nifty IT",
+    "^NSEI":      "Nifty 50",
+    "^BSESN":     "Sensex",
+    "^NSEBANK":   "Bank Nifty",
+    "^CNXIT":     "Nifty IT",       # ^CNXIT is the actual index; NIFTYIT.NS is an ETF
     "^CNXPHARMA": "Nifty Pharma",
-    "^CNXAUTO":  "Nifty Auto",
+    "^CNXAUTO":   "Nifty Auto",
 }
 
 
@@ -98,12 +98,16 @@ class YFinanceAdapter(BrokerAdapter):
     # ── BrokerAdapter interface ───────────────────────────────────────────────
 
     async def get_quote(self, symbol: str) -> Optional[Quote]:
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, self._sync_quote, symbol)
+        """Live quotes disabled — no broker configured. Returns a zero-priced Quote."""
+        return Quote(
+            symbol=symbol, price=0.0, prev_close=0.0, change=0.0, change_pct=0.0,
+            volume=0, high=0.0, low=0.0, open=0.0,
+            timestamp=datetime.utcnow().isoformat(),
+        )
 
     async def get_quotes_batch(self, symbols: List[str]) -> List[Quote]:
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, self._sync_batch, symbols)
+        """Live batch quotes disabled — no broker configured. Returns empty list."""
+        return []
 
     async def get_history(
         self,
@@ -111,14 +115,14 @@ class YFinanceAdapter(BrokerAdapter):
         period: str = "1y",
         interval: str = "1d",
     ) -> List[OHLCVBar]:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             None, self._sync_history, symbol, period, interval
         )
 
     async def get_indices(self) -> List[Quote]:
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, self._sync_indices)
+        """Live index quotes disabled — no broker configured. Returns empty list."""
+        return []
 
     # ── Sync implementations (run in thread pool) ─────────────────────────────
 
@@ -134,6 +138,7 @@ class YFinanceAdapter(BrokerAdapter):
             prev = self._safe_float(info.previous_close) or price
             change = price - prev
             change_pct = (change / prev * 100) if prev else 0.0
+            _record_success()
             return Quote(
                 symbol=symbol,
                 price=price,
@@ -148,81 +153,62 @@ class YFinanceAdapter(BrokerAdapter):
             )
         except Exception as e:
             _record_failure()
-            logger.warning("yfinance_quote_failed", symbol=ticker, error=str(e))
+            logger.warning("yfinance_quote_failed", symbol=ticker, err=str(e))
             return None
-        _record_success()
 
-    @_yf_retry
     def _sync_batch(self, symbols: List[str]) -> List[Quote]:
-        """Batch download using yfinance.download for efficiency."""
-        import pandas as pd
+        """Fetch quotes for multiple symbols via individual fast_info calls.
+
+        Uses concurrent.futures.ThreadPoolExecutor to fetch symbols in parallel.
+        This avoids yfinance.download() which suffers from Yahoo Finance rate
+        limiting and a multi-index column ambiguity bug in recent yfinance versions.
+        Each fast_info call is independent so a failure on one ticker does not
+        affect the others.
+        """
         import yfinance as yf
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
         _check_circuit()
-        tickers = [self._to_ns(s) for s in symbols]
         quotes: List[Quote] = []
 
+        def _fetch_one(orig_sym: str) -> Optional[Quote]:
+            ticker = self._to_ns(orig_sym)
+            try:
+                fi = yf.Ticker(ticker).fast_info
+                price = self._safe_float(fi.last_price)
+                prev  = self._safe_float(fi.previous_close) or price
+                if not price:
+                    return None
+                change = price - prev
+                change_pct = (change / prev * 100) if prev else 0.0
+                return Quote(
+                    symbol=orig_sym,
+                    price=price,
+                    prev_close=prev,
+                    change=round(change, 4),
+                    change_pct=round(change_pct, 2),
+                    volume=int(fi.three_month_average_volume or 0),
+                    high=self._safe_float(fi.day_high) or price,
+                    low=self._safe_float(fi.day_low) or price,
+                    open=self._safe_float(fi.open) or price,
+                    timestamp=datetime.utcnow().isoformat(),
+                )
+            except Exception as e:
+                logger.debug("yfinance_batch_ticker_error", ticker=ticker, err=str(e))
+                return None
+
         try:
-            data = yf.download(
-                tickers,
-                period="5d",
-                interval="1d",
-                progress=False,
-                auto_adjust=True,
-                threads=True,
-            )
-            if data is None or data.empty:
-                return quotes
-
-            close_df = data.get("Close")
-            open_df  = data.get("Open")
-            high_df  = data.get("High")
-            low_df   = data.get("Low")
-            vol_df   = data.get("Volume")
-
-            for orig_sym, ticker in zip(symbols, tickers):
-                try:
-                    if isinstance(close_df, pd.Series):
-                        close_s = close_df.dropna()
-                        open_s = open_df.dropna()
-                        high_s = high_df.dropna()
-                        low_s = low_df.dropna()
-                        vol_s = vol_df.dropna()
-                    else:
-                        if ticker not in close_df.columns:
-                            continue
-                        close_s = close_df[ticker].dropna()
-                        open_s = open_df[ticker].dropna()
-                        high_s = high_df[ticker].dropna()
-                        low_s = low_df[ticker].dropna()
-                        vol_s = vol_df[ticker].dropna()
-
-                    if len(close_s) < 2:
-                        continue
-
-                    price = self._safe_float(close_s.iloc[-1])
-                    prev  = self._safe_float(close_s.iloc[-2])
-                    change = price - prev
-                    change_pct = (change / prev * 100) if prev else 0.0
-
-                    quotes.append(Quote(
-                        symbol=orig_sym,
-                        price=price,
-                        prev_close=prev,
-                        change=round(change, 4),
-                        change_pct=round(change_pct, 2),
-                        volume=int(vol_s.iloc[-1]) if len(vol_s) else 0,
-                        high=self._safe_float(high_s.iloc[-1]) if len(high_s) else price,
-                        low=self._safe_float(low_s.iloc[-1]) if len(low_s) else price,
-                        open=self._safe_float(open_s.iloc[-1]) if len(open_s) else price,
-                        timestamp=datetime.utcnow().isoformat(),
-                    ))
-                except Exception as e:
-                    logger.debug("yfinance_batch_ticker_error", ticker=ticker, error=str(e))
-
+            # Cap concurrency at 10 to avoid hammering Yahoo Finance
+            with ThreadPoolExecutor(max_workers=10) as pool:
+                futures = {pool.submit(_fetch_one, sym): sym for sym in symbols}
+                for fut in as_completed(futures):
+                    result = fut.result()
+                    if result is not None:
+                        quotes.append(result)
         except Exception as e:
             _record_failure()
-            logger.error("yfinance_batch_failed", error=str(e))
+            logger.error("yfinance_batch_failed", err=str(e))
+            return quotes
 
         _record_success()
         return quotes
@@ -257,7 +243,7 @@ class YFinanceAdapter(BrokerAdapter):
                 ))
         except Exception as e:
             _record_failure()
-            logger.error("yfinance_history_failed", symbol=ticker, error=str(e))
+            logger.error("yfinance_history_failed", symbol=ticker, err=str(e))
         else:
             _record_success()
         return bars
@@ -290,6 +276,6 @@ class YFinanceAdapter(BrokerAdapter):
                 quotes.append(q)
             except Exception as e:
                 _record_failure()
-                logger.warning("yfinance_index_failed", index=yf_sym, error=str(e))
+                logger.warning("yfinance_index_failed", index=yf_sym, err=str(e))
         _record_success()
         return quotes

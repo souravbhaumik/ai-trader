@@ -1,9 +1,10 @@
-﻿import { useEffect, useState } from 'react'
+﻿import { useQuery } from '@tanstack/react-query'
 import { Zap, TrendingUp, TrendingDown } from 'lucide-react'
 import { apiClient } from '../api/client'
 import ForecastModal from '../components/ForecastModal'
 import OrderModal, { OrderDefaults } from '../components/OrderModal'
 import TickerLogo from '../components/TickerLogo'
+import { useState } from 'react'
 
 interface Signal {
   id: string; symbol: string; ts: string; signal_type: 'BUY' | 'SELL' | 'HOLD'
@@ -25,18 +26,16 @@ function ScoreBar({ value }: { value: number }) {
 }
 
 export default function OpportunitiesPage() {
-  const [signals, setSignals] = useState<Signal[]>([])
-  const [loading, setLoading] = useState(true)
   const [filter, setFilter]   = useState<'ALL'|'BUY'|'SELL'>('ALL')
   const [forecastSym, setForecastSym]   = useState<string | null>(null)
   const [orderDefaults, setOrderDefaults] = useState<OrderDefaults | null>(null)
 
-  useEffect(() => {
-    apiClient.get<{ signals: Signal[] }>('/signals?per_page=50&active=true')
-      .then(r => setSignals(r.data.signals ?? []))
-      .catch(() => {})
-      .finally(() => setLoading(false))
-  }, [])
+  const { data, isLoading: loading } = useQuery<{ signals: Signal[] }>({
+    queryKey: ['opportunities-signals'],
+    queryFn: () => apiClient.get('/signals?per_page=50&active=true').then(r => r.data),
+    refetchInterval: 60_000,
+  })
+  const signals = data?.signals ?? []
 
   const visible = filter === 'ALL' ? signals
     : signals.filter(s => s.signal_type === filter)

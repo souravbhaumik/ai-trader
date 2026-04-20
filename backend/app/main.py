@@ -1,4 +1,4 @@
-"""FastAPI application factory."""
+﻿"""FastAPI application factory."""
 from __future__ import annotations
 
 import asyncio
@@ -46,7 +46,7 @@ def _download_ml_models() -> None:
             gdown.download(url, str(dest), quiet=False)
             logger.info("startup.model_download_done", model=name, path=dest_path)
         except Exception as exc:
-            logger.warning("startup.model_download_failed", model=name, error=str(exc))
+            logger.warning("startup.model_download_failed", model=name, err=str(exc))
 
 
 @asynccontextmanager
@@ -58,7 +58,7 @@ async def lifespan(app: FastAPI):
     try:
         _download_ml_models()
     except Exception as exc:
-        logger.warning("startup.download_ml_models_failed", error=str(exc))
+        logger.warning("startup.download_ml_models_failed", err=str(exc))
 
     # Any task still marked 'running' at startup was interrupted by a shutdown.
     # Reset those rows to 'unknown' so the UI doesn't show stale RUNNING badges.
@@ -66,7 +66,7 @@ async def lifespan(app: FastAPI):
         from app.tasks.task_utils import reset_interrupted_tasks
         reset_interrupted_tasks()
     except Exception as exc:
-        logger.warning("startup.reset_interrupted_tasks_failed", error=str(exc))
+        logger.warning("startup.reset_interrupted_tasks_failed", err=str(exc))
 
     # Start the single shared price broadcaster for WebSocket fan-out
     from app.api.v1.ws import price_broadcaster, signal_broadcaster
@@ -88,6 +88,9 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     from app.api.v1 import router as v1_router
+    from app.core.rate_limiter import limiter
+    from slowapi import _rate_limit_exceeded_handler
+    from slowapi.errors import RateLimitExceeded
 
     app = FastAPI(
         title="AI Trader API",
@@ -96,6 +99,10 @@ def create_app() -> FastAPI:
         redoc_url=None,
         lifespan=lifespan,
     )
+
+    # ── Rate Limiting ──────────────────────────────────────────────────────────
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
     # ── CORS ──────────────────────────────────────────────────────────────────
     app.add_middleware(

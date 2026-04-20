@@ -1,4 +1,4 @@
-"""Pydantic v2 schemas for auth endpoints."""
+﻿"""Pydantic v2 schemas for auth endpoints."""
 from __future__ import annotations
 
 import uuid

@@ -1,4 +1,4 @@
-"""Auth endpoints: login, refresh, logout, register, TOTP setup."""
+﻿"""Auth endpoints: login, refresh, logout, register, TOTP setup."""
 from __future__ import annotations
 
 import base64

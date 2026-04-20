@@ -1,4 +1,4 @@
-"""Common envelope / error schemas."""
+﻿"""Common envelope / error schemas."""
 from __future__ import annotations
 
 from typing import Generic, TypeVar

@@ -1,15 +1,17 @@
-"""Prices API — market quotes, indices, historical OHLCV."""
+﻿"""Prices API — market quotes, indices, historical OHLCV."""
 from __future__ import annotations
 
 from typing import Annotated, List
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_current_user, get_current_user_settings
 from app.brokers.factory import get_adapter_for_user
+from app.core.config import settings
 from app.core.database import get_session
+from app.core.rate_limiter import limiter
 from app.models.user import User
 from app.models.user_settings import UserSettings
 from app.services import price_service
@@ -20,7 +22,9 @@ router = APIRouter(prefix="/prices", tags=["prices"])
 
 
 @router.get("/indices")
+@limiter.limit(settings.rate_limit_prices)
 async def get_indices(
+    request: Request,
     user: Annotated[User, Depends(get_current_user)],
     user_settings: Annotated[UserSettings, Depends(get_current_user_settings)],
     session: AsyncSession = Depends(get_session),
@@ -35,18 +39,21 @@ async def get_indices(
     return {
         "broker":         adapter.broker_name,
         "is_configured":  broker_configured,
+        "source":         "live" if broker_configured else "backfill",
         "indices":        [q.__dict__ for q in quotes],
         "warning":        None if broker_configured else (
-            f"{user_settings.preferred_broker} credentials not configured. "
-            "Showing yfinance (15-min delayed) data."
-            if user_settings.preferred_broker and user_settings.preferred_broker != "yfinance"
-            else None
+            f"{user_settings.preferred_broker or 'Broker'} credentials not configured. "
+            "Showing backfill data — prices may be delayed."
+            if user_settings.preferred_broker
+            else "No broker configured. Showing backfill data."
         ),
     }
 
 
 @router.get("/{symbol}/quote")
+@limiter.limit(settings.rate_limit_prices)
 async def get_quote(
+    request: Request,
     symbol: str,
     user: Annotated[User, Depends(get_current_user)],
     user_settings: Annotated[UserSettings, Depends(get_current_user_settings)],
@@ -62,12 +69,16 @@ async def get_quote(
     return {
         "broker":        adapter.broker_name,
         "is_configured": adapter.is_credentials_configured(),
+        "source":        "live" if adapter.is_credentials_configured() else "backfill",
+        "no_live_data":  adapter.broker_name == "yfinance",
         "quote":         quote.__dict__,
     }
 
 
 @router.get("/{symbol}/history")
+@limiter.limit(settings.rate_limit_prices)
 async def get_history(
+    request: Request,
     symbol: str,
     user: Annotated[User, Depends(get_current_user)],
     user_settings: Annotated[UserSettings, Depends(get_current_user_settings)],

@@ -1,4 +1,4 @@
-"""SQLAlchemy engines and session factories.
+﻿"""SQLAlchemy engines and session factories.
 
 Two engines share the same models:
   * ``engine``     — async (asyncpg) for FastAPI request handlers

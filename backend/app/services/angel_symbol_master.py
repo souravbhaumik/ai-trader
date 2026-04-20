@@ -1,4 +1,4 @@
-"""Angel One instrument master — token lookup utility.
+﻿"""Angel One instrument master — token lookup utility.
 
 Downloads the public OpenAPIScripMaster.json from Angel One CDN on first use
 and keeps the NSE/BSE equity instruments in an in-memory dict.
@@ -69,7 +69,7 @@ async def _load_master() -> None:
             return
         try:
             logger.info("angel_symbol_master: downloading instrument master …")
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             raw: list = await loop.run_in_executor(None, _fetch_json, _MASTER_URL)
             count = 0
             for entry in raw:

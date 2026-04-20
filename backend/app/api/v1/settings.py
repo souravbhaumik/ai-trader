@@ -1,4 +1,4 @@
-﻿"""Settings API — read and update user trading preferences."""
+﻿"""Settings API � read and update user trading preferences."""
 from __future__ import annotations
 
 import random
@@ -32,6 +32,8 @@ class SettingsOut(BaseModel):
     notification_orders: bool
     notification_news: bool
     preferred_broker: Optional[str]
+    enforce_market_hours: bool
+    max_sector_exposure_pct: float
 
 
 class SettingsPatch(BaseModel):
@@ -43,6 +45,8 @@ class SettingsPatch(BaseModel):
     notification_orders: Optional[bool] = None
     notification_news: Optional[bool] = None
     preferred_broker: Optional[str] = None
+    enforce_market_hours: Optional[bool] = None
+    max_sector_exposure_pct: Optional[float] = None
 
 
 @router.get("", response_model=SettingsOut)
@@ -59,6 +63,8 @@ async def get_settings(
         notification_orders=user_settings.notification_orders,
         notification_news=user_settings.notification_news,
         preferred_broker=user_settings.preferred_broker,
+        enforce_market_hours=user_settings.enforce_market_hours,
+        max_sector_exposure_pct=float(user_settings.max_sector_exposure_pct),
     )
 
 
@@ -88,12 +94,19 @@ async def update_settings(
     if body.notification_news is not None:
         user_settings.notification_news = body.notification_news
     if body.preferred_broker is not None:
-        valid_brokers = {"yfinance", "angel_one", "upstox"}
+        valid_brokers = {"angel_one", "upstox"}
         if body.preferred_broker not in valid_brokers:
             from fastapi import HTTPException, status
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                                 f"preferred_broker must be one of {sorted(valid_brokers)}")
         user_settings.preferred_broker = body.preferred_broker
+    if body.enforce_market_hours is not None:
+        user_settings.enforce_market_hours = body.enforce_market_hours
+    if body.max_sector_exposure_pct is not None:
+        if not (5.0 <= body.max_sector_exposure_pct <= 100.0):
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                "max_sector_exposure_pct must be between 5 and 100")
+        user_settings.max_sector_exposure_pct = Decimal(str(body.max_sector_exposure_pct))
 
     from datetime import datetime, timezone
     user_settings.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -111,17 +124,25 @@ async def update_settings(
         notification_orders=user_settings.notification_orders,
         notification_news=user_settings.notification_news,
         preferred_broker=user_settings.preferred_broker,
+        enforce_market_hours=user_settings.enforce_market_hours,
+        max_sector_exposure_pct=float(user_settings.max_sector_exposure_pct),
     )
 
 
-# ── Live-trading enablement (email OTP gate) ──────────────────────────────────
+# -- Live-trading enablement (email OTP gate) ----------------------------------
 
-_OTP_TTL    = 120     # seconds — code expires after 2 minutes
+_OTP_TTL    = 600     # seconds — code expires after 10 minutes (per API.md spec)
 _OTP_DIGITS = 6
+_OTP_MAX_ATTEMPTS = 5
+_OTP_LOCKOUT_TTL  = 900   # 15-minute lockout after max attempts
 
 
 def _otp_redis_key(user_id) -> str:
     return f"live_enable_otp:{user_id}"
+
+
+def _otp_attempts_key(user_id) -> str:
+    return f"live_enable_attempts:{user_id}"
 
 
 class EnableLiveTradingResponse(BaseModel):
@@ -180,6 +201,17 @@ async def confirm_live_trading_otp(
 
     from app.core.redis_client import get_redis
     redis = get_redis()
+
+    # ── Brute-force protection ────────────────────────────────────────────────
+    attempts_key = _otp_attempts_key(user.id)
+    attempts = await redis.get(attempts_key)
+    attempts_int = int(attempts) if attempts else 0
+    if attempts_int >= _OTP_MAX_ATTEMPTS:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            f"Too many failed attempts. Please wait 15 minutes and request a new OTP."
+        )
+
     stored = await redis.get(_otp_redis_key(user.id))
 
     if stored is None:
@@ -188,10 +220,20 @@ async def confirm_live_trading_otp(
 
     stored_str = stored.decode() if isinstance(stored, bytes) else stored
     if stored_str != body.code.strip():
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid OTP code.")
+        # Increment failed attempts
+        pipe = redis.pipeline()
+        pipe.incr(attempts_key)
+        pipe.expire(attempts_key, _OTP_LOCKOUT_TTL)
+        await pipe.execute()
+        remaining = _OTP_MAX_ATTEMPTS - attempts_int - 1
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"Invalid OTP code. {remaining} attempt(s) remaining."
+        )
 
-    # Verified — enable live trading and delete OTP
+    # Verified — enable live trading and delete OTP + attempts
     await redis.delete(_otp_redis_key(user.id))
+    await redis.delete(attempts_key)
 
     result = await session.execute(select(User).where(User.id == user.id))
     db_user = result.scalar_one()

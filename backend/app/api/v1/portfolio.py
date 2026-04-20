@@ -1,4 +1,4 @@
-"""Paper portfolio endpoints — Phase 5.
+﻿"""Paper portfolio endpoints — Phase 5.
 
 GET  /portfolio/paper/summary     — cash balance, P&L, win rate
 GET  /portfolio/paper/positions   — open trades
@@ -13,7 +13,7 @@ from __future__ import annotations
 import uuid
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -98,10 +98,26 @@ async def get_trade_history(
 @router.post("/paper/orders", response_model=dict, status_code=status.HTTP_201_CREATED)
 async def place_paper_order(
     body: PaperOrderCreate,
+    request: Request,
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ):
-    """Manually open a paper trade."""
+    """Manually open a paper trade.
+
+    Supports idempotency via ``Idempotency-Key`` header to prevent duplicate
+    orders from network retries.
+    """
+    # ── Idempotency check ─────────────────────────────────────────────────────
+    idem_key = request.headers.get("Idempotency-Key")
+    if idem_key:
+        from app.core.redis_client import get_redis
+        redis = get_redis()
+        cache_key = f"idem:paper:{current_user.id}:{idem_key}"
+        cached = await redis.get(cache_key)
+        if cached:
+            import json
+            return json.loads(cached)
+
     try:
         result = await svc.open_trade(
             session,
@@ -116,6 +132,15 @@ async def place_paper_order(
         )
     except ValueError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
+
+    # Cache result for idempotency (5 min TTL)
+    if idem_key:
+        import json
+        from app.core.redis_client import get_redis
+        redis = get_redis()
+        cache_key = f"idem:paper:{current_user.id}:{idem_key}"
+        await redis.setex(cache_key, 300, json.dumps(result))
+
     return result
 
 

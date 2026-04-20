@@ -403,22 +403,22 @@ export default function PaperTradingPage() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
 
-      {/* ── Header ─────────────────────────────────────────────────────────── */}
-      <div className="section-header">
-        <div>
-          <h2 className="section-title">Paper Trading</h2>
-          <p className="text-muted text-sm" style={{ marginTop: 4 }}>
-            Practice trades with virtual money — no real risk
-          </p>
+      {/* ── Page Header ─────────────────────────────────────────────────────── */}
+      <div className="page-header">
+        <div className="page-header-left">
+          <div className="page-header-title">Paper Trading</div>
+          <div className="page-header-sub">Practice trades with virtual money — no real risk</div>
         </div>
-        <button
-          className="btn"
-          style={{ display: 'flex', alignItems: 'center', gap: 6 }}
-          onClick={() => setShowForm(f => !f)}
-        >
-          <PlusCircle size={15} />
-          {showForm ? 'Cancel' : 'New Order'}
-        </button>
+        <div className="page-header-actions">
+          <button
+            className="btn"
+            style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+            onClick={() => setShowForm(f => !f)}
+          >
+            <PlusCircle size={15} />
+            {showForm ? 'Cancel' : 'New Order'}
+          </button>
+        </div>
       </div>
 
       {/* ── Order form ─────────────────────────────────────────────────────── */}

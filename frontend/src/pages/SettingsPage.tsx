@@ -31,11 +31,18 @@ export default function SettingsPage() {
   const [notifSig, setNotifSig]       = useState(true)
   const [notifOrders, setNotifOrders] = useState(true)
   const [notifNews, setNotifNews]     = useState(true)
-  const [broker, setBroker]           = useState('yfinance')
+  const [broker, setBroker]           = useState('angel_one')
 
   // Broker credential form
   const [brokerForm, setBrokerForm]   = useState<BrokerCreds>({ client_id:'', api_key:'', api_secret:'', totp_secret:'' })
+  const [poolEligible, setPoolEligible] = useState(false)
   const [savingCreds, setSavingCreds] = useState(false)
+
+  // OTP gate state for live trading enablement
+  const [showOtpModal, setShowOtpModal] = useState(false)
+  const [otpCode, setOtpCode]           = useState('')
+  const [otpSending, setOtpSending]     = useState(false)
+  const [otpVerifying, setOtpVerifying] = useState(false)
 
   // Delete account
   const [showDeleteModal, setShowDeleteModal] = useState(false)
@@ -51,10 +58,16 @@ export default function SettingsPage() {
       setNotifSig(d.notification_signals)
       setNotifOrders(d.notification_orders)
       setNotifNews(d.notification_news ?? true)
-      setBroker(d.preferred_broker ?? 'yfinance')
+      setBroker(d.preferred_broker ?? 'angel_one')
       setLoaded(true)
     }).catch(() => setLoaded(true))
   }, [])
+
+  useEffect(() => {
+    apiClient.get(`/broker-credentials/${broker}`)
+      .then(r => setPoolEligible(Boolean(r.data?.pool_eligible)))
+      .catch(() => setPoolEligible(false))
+  }, [broker])
 
   async function saveSettings() {
     setSaving(true)
@@ -78,13 +91,55 @@ export default function SettingsPage() {
   }
 
   async function handleModeChange(newMode: 'paper' | 'live') {
+    if (newMode === 'live') {
+      // Require OTP verification before switching to live
+      setOtpSending(true)
+      try {
+        await apiClient.post('/settings/live-trading/enable')
+        setShowOtpModal(true)
+        setOtpCode('')
+        toast.success('OTP sent to your email.')
+      } catch (e: unknown) {
+        const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+        if (msg?.includes('already enabled')) {
+          // Already verified — just switch
+          setMode('live')
+          await apiClient.patch('/settings', { trading_mode: 'live' })
+          setTradingMode('live')
+        } else {
+          toast.error(msg ?? 'Failed to send OTP.')
+        }
+      } finally {
+        setOtpSending(false)
+      }
+      return
+    }
+    // Switching to paper — no verification needed
     setMode(newMode)
     try {
       await apiClient.patch('/settings', { trading_mode: newMode })
       setTradingMode(newMode)
     } catch {
       toast.error('Failed to save trading mode.')
-      setMode(mode) // revert
+      setMode(mode)
+    }
+  }
+
+  async function handleOtpConfirm() {
+    if (!otpCode || otpCode.length !== 6) { toast.error('Enter the 6-digit code.'); return }
+    setOtpVerifying(true)
+    try {
+      await apiClient.post('/settings/live-trading/confirm', { code: otpCode })
+      setMode('live')
+      await apiClient.patch('/settings', { trading_mode: 'live' })
+      setTradingMode('live')
+      setShowOtpModal(false)
+      toast.success('Live trading enabled!')
+    } catch (e: unknown) {
+      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      toast.error(msg ?? 'Invalid OTP.')
+    } finally {
+      setOtpVerifying(false)
     }
   }
 
@@ -98,10 +153,12 @@ export default function SettingsPage() {
   }
 
   async function saveBrokerCreds() {
-    if (broker === 'yfinance') return
     setSavingCreds(true)
     try {
-      await apiClient.put(`/broker-credentials/${broker}`, brokerForm)
+      await apiClient.put(`/broker-credentials/${broker}`, {
+        ...brokerForm,
+        pool_eligible: poolEligible,
+      })
       toast.success('Credentials saved.')
       setBrokerForm({ client_id:'', api_key:'', api_secret:'', totp_secret:'' })
     } catch {
@@ -129,10 +186,10 @@ export default function SettingsPage() {
 
   return (
     <div className="settings-page">
-      <div className="section-header" style={{ marginBottom:0 }}>
-        <div>
-          <h2 className="section-title">Settings</h2>
-          <p className="text-muted text-sm" style={{ marginTop:4 }}>Manage your account, risk and notification preferences</p>
+      <div className="page-header">
+        <div className="page-header-left">
+          <div className="page-header-title">Settings</div>
+          <div className="page-header-sub">Manage your account, risk and notification preferences</div>
         </div>
       </div>
 
@@ -309,31 +366,47 @@ export default function SettingsPage() {
             <div className="settings-row">
               <div>
                 <div className="settings-row-label">Data Source</div>
-                <div className="settings-row-sub">yfinance = free 15-min delayed. Angel One / Upstox = real-time (requires credentials below).</div>
+                <div className="settings-row-sub">Angel One / Upstox = real-time. No credentials configured = prices show as 0.00.</div>
               </div>
               <select value={broker} onChange={e => handleBrokerChange(e.target.value)}
                 style={{ background:'var(--bg-card)', color:'var(--text-primary)', border:'1px solid var(--border)', borderRadius:8, padding:'6px 12px', fontSize:13 }}>
-                <option value="yfinance">yfinance (free, delayed)</option>
                 <option value="angel_one">Angel One</option>
                 <option value="upstox">Upstox</option>
               </select>
             </div>
 
-            {broker !== 'yfinance' && (
+            {(
               <div style={{ marginTop:16, display:'flex', flexDirection:'column', gap:10 }}>
                 <div className="text-sm text-muted">Enter your {broker === 'angel_one' ? 'Angel One' : 'Upstox'} API credentials. They are stored encrypted on the server.</div>
-                {(['client_id','api_key','api_secret', ...(broker === 'angel_one' ? ['totp_secret'] : [])] as (keyof BrokerCreds)[]).map(field => (
-                  <div key={field} className="form-group" style={{ margin:0 }}>
-                    <label style={{ fontSize:12, color:'var(--text-muted)', marginBottom:4, display:'block' }}>
-                      {field.replace(/_/g,' ').toUpperCase()}
-                    </label>
-                    <input type="password" autoComplete="off"
-                      placeholder="Paste value here…"
-                      value={brokerForm[field]}
-                      onChange={e => setBrokerForm(f => ({ ...f, [field]: e.target.value }))}
-                    />
+                {(['client_id','api_key','api_secret', ...(broker === 'angel_one' ? ['totp_secret'] : [])] as (keyof BrokerCreds)[]).map(field => {
+                  const label = broker === 'angel_one' && field === 'api_secret'
+                    ? 'MPIN (4-digit login PIN)'
+                    : broker === 'angel_one' && field === 'totp_secret'
+                    ? 'TOTP Secret (from authenticator app)'
+                    : field.replace(/_/g,' ').toUpperCase()
+                  const ph = broker === 'angel_one' && field === 'api_secret'
+                    ? 'Your 4-digit Angel One MPIN'
+                    : 'Paste value here…'
+                  return (
+                    <div key={field} className="form-group" style={{ margin:0 }}>
+                      <label style={{ fontSize:12, color:'var(--text-muted)', marginBottom:4, display:'block' }}>
+                        {label}
+                      </label>
+                      <input type="password" autoComplete="off"
+                        placeholder={ph}
+                        value={brokerForm[field]}
+                        onChange={e => setBrokerForm(f => ({ ...f, [field]: e.target.value }))}
+                      />
+                    </div>
+                  )
+                })}
+                <div className="settings-row" style={{ marginTop: 6 }}>
+                  <div>
+                    <div className="settings-row-label">Contribute to shared data pool</div>
+                    <div className="settings-row-sub">Allow your broker session to help fetch shared market quotes.</div>
                   </div>
-                ))}
+                  <Toggle checked={poolEligible} onChange={setPoolEligible} />
+                </div>
                 <div style={{ display:'flex', justifyContent:'flex-end', marginTop:4 }}>
                   <button className="btn btn-green" style={{ fontSize:13 }} onClick={saveBrokerCreds} disabled={savingCreds}>
                     {savingCreds ? 'Saving…' : 'Save Credentials'}
@@ -345,6 +418,48 @@ export default function SettingsPage() {
 
         </div>{/* end right column */}
       </div>{/* end 2-col grid */}
+
+      {/* OTP verification modal for live trading */}
+      {showOtpModal && (
+        <div style={{
+          position:'fixed', inset:0, background:'rgba(0,0,0,0.6)', zIndex:1000,
+          display:'flex', alignItems:'center', justifyContent:'center',
+        }} onClick={() => setShowOtpModal(false)}>
+          <div style={{
+            background:'var(--bg-card)', borderRadius:12, padding:28, width:360,
+            border:'1px solid var(--border)', boxShadow:'0 20px 60px rgba(0,0,0,0.4)',
+          }} onClick={e => e.stopPropagation()}>
+            <div style={{ fontSize:20, marginBottom:8 }}>🔐</div>
+            <div style={{ fontWeight:700, fontSize:16, marginBottom:6 }}>Enable Live Trading</div>
+            <div style={{ fontSize:13, color:'var(--text-muted)', marginBottom:18 }}>
+              A 6-digit code was sent to your email. Enter it below to enable live trading with real money.
+            </div>
+            <input
+              type="text"
+              placeholder="Enter 6-digit OTP"
+              value={otpCode}
+              onChange={e => setOtpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+              onKeyDown={e => e.key === 'Enter' && handleOtpConfirm()}
+              style={{ width:'100%', marginBottom:16, textAlign:'center', fontSize:18, letterSpacing:'0.3em' }}
+              autoFocus
+              maxLength={6}
+            />
+            <div style={{ display:'flex', gap:10, justifyContent:'flex-end' }}>
+              <button className="btn btn-outline" onClick={() => setShowOtpModal(false)}>
+                Cancel
+              </button>
+              <button
+                className="btn"
+                onClick={handleOtpConfirm}
+                disabled={otpVerifying || otpCode.length !== 6}
+                style={{ background:'var(--green)', color:'#fff', border:'none' }}
+              >
+                {otpVerifying ? 'Verifying…' : 'Confirm'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Delete account confirmation modal */}
       {showDeleteModal && (

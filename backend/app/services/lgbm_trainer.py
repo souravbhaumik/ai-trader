@@ -1,4 +1,4 @@
-"""LightGBM model trainer — Phase 3.
+﻿"""LightGBM model trainer — Phase 3.
 
 Trains a binary LightGBM classifier to predict next-day direction
 (BUY = close[t+1] > close[t] * 1.005, else SELL/HOLD).
@@ -46,9 +46,10 @@ def _fetch_all_ohlcv(session) -> dict[str, list[dict]]:
         text("""
             SELECT symbol, ts, open, high, low, close, volume
             FROM   ohlcv_daily
-            WHERE  ts >= NOW() - INTERVAL ':lb days'
+            WHERE  ts >= NOW() - INTERVAL :lb
             ORDER  BY symbol, ts ASC
-        """.replace(":lb", str(_LOOKBACK_BARS))),
+        """),
+        {"lb": f"{_LOOKBACK_BARS} days"},
     ).fetchall()
 
     out: dict[str, list] = {}
@@ -158,7 +159,7 @@ def train_lgbm(
         raise RuntimeError(f"Too few training samples: {len(X)}. Need at least 200.")
 
     X_train, X_val, y_train, y_val = train_test_split(
-        X, y, test_size=0.15, shuffle=True, random_state=42, stratify=y
+        X, y, test_size=0.15, shuffle=False,  # temporal split: no shuffle to prevent leakage
     )
 
     # ── 3. Train ──────────────────────────────────────────────────────────────

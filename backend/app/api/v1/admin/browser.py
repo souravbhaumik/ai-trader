@@ -1,4 +1,4 @@
-"""Admin browser endpoints — DB table explorer, SQL runner, Redis key browser."""
+"""Admin browser endpoints � DB table explorer, SQL runner, Redis key browser."""
 from __future__ import annotations
 
 import json
@@ -7,70 +7,40 @@ from typing import Any
 import redis.asyncio as aioredis
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from jose import JWTError
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.database import get_session
-from app.core.security import decode_access_token
+from app.api.v1.deps import require_admin
 from app.models.user import User
 
 logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/admin/browser", tags=["admin-browser"])
 
-# ── Auth helper (same pattern as users.py) ───────────────────────────────────
 
-async def _require_admin(request: Request, session: AsyncSession) -> User:
-    from sqlalchemy import select
-    import uuid
-    auth_hdr = request.headers.get("Authorization", "")
-    if not auth_hdr.startswith("Bearer "):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing bearer token.")
-    token = auth_hdr.removeprefix("Bearer ").strip()
-    try:
-        payload = decode_access_token(token)
-    except JWTError:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired token.")
-    if payload.get("role") != "admin":
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin role required.")
-    result = await session.execute(select(User).where(User.id == uuid.UUID(payload["sub"])))
-    user = result.scalar_one_or_none()
-    if user is None or not user.is_active:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Account inactive.")
-    return user
-
-
-# ── DB: list tables ───────────────────────────────────────────────────────────
+# -- DB: list tables -----------------------------------------------------------
 
 @router.get("/db/tables")
 async def list_tables(
     request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> list[dict]:
-    await _require_admin(request, session)
+    await require_admin(request, session)
     result = await session.execute(text("""
-        SELECT
-            t.table_name,
-            pg_size_pretty(pg_total_relation_size(quote_ident(t.table_name))) AS size,
-            GREATEST(
-                COALESCE(s.n_live_tup, 0),
-                COALESCE(c.reltuples::bigint, 0)
-            ) AS row_estimate
-        FROM information_schema.tables t
-        LEFT JOIN pg_stat_user_tables s ON s.relname = t.table_name
-        LEFT JOIN pg_class c ON c.relname = t.table_name AND c.relkind = 'r'
-        WHERE t.table_schema = 'public'
-          AND t.table_type = 'BASE TABLE'
-        ORDER BY t.table_name
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema = 'public'
+          AND table_type = 'BASE TABLE'
+        ORDER BY table_name
     """))
     rows = result.mappings().all()
     return [dict(r) for r in rows]
 
 
-# ── DB: table rows ────────────────────────────────────────────────────────────
+# -- DB: table rows ------------------------------------------------------------
 
 @router.get("/db/tables/{table_name}/rows")
 async def table_rows(
@@ -79,7 +49,7 @@ async def table_rows(
     limit: int = 20,
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    await _require_admin(request, session)
+    await require_admin(request, session)
     # Validate table exists to prevent injection
     check = await session.execute(text(
         "SELECT 1 FROM information_schema.tables "
@@ -88,15 +58,18 @@ async def table_rows(
     if check.first() is None:
         raise HTTPException(404, f"Table '{table_name}' not found.")
     limit = max(1, min(limit, 500))
+    # Get total row count
+    count_result = await session.execute(text(f'SELECT COUNT(*) FROM "{table_name}"'))
+    total_count = count_result.scalar() or 0
     result = await session.execute(
         text(f'SELECT * FROM "{table_name}" LIMIT :lim'), {"lim": limit}
     )
     columns = list(result.keys())
     rows = [_serialize_row(dict(zip(columns, r))) for r in result.fetchall()]
-    return {"columns": columns, "rows": rows}
+    return {"columns": columns, "rows": rows, "count": total_count}
 
 
-# ── DB: custom SQL query ──────────────────────────────────────────────────────
+# -- DB: custom SQL query ------------------------------------------------------
 
 class QueryRequest(BaseModel):
     sql: str
@@ -108,12 +81,17 @@ async def run_query(
     request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    await _require_admin(request, session)
+    await require_admin(request, session)
     sql = body.sql.strip().rstrip(";").strip()
     # Block PL/pgSQL anonymous blocks only (DO $$ ... $$)
     normalized = sql.upper().lstrip()
     if normalized.startswith("DO"):
         raise HTTPException(400, "PL/pgSQL anonymous blocks (DO) are not allowed.")
+    # Enforce 200-row cap on SELECT/WITH queries that have no LIMIT clause
+    is_read = normalized.startswith(("SELECT", "WITH", "TABLE"))
+    has_limit = "LIMIT" in normalized
+    if is_read and not has_limit:
+        sql = f'SELECT * FROM ({sql}) AS _q LIMIT 200'
     try:
         result = await session.execute(text(sql))
         await session.commit()
@@ -130,7 +108,7 @@ async def run_query(
         raise HTTPException(400, str(exc)) from exc
 
 
-# ── Redis: list keys ──────────────────────────────────────────────────────────
+# -- Redis: list keys ----------------------------------------------------------
 
 @router.get("/redis/keys")
 async def redis_keys(
@@ -138,7 +116,7 @@ async def redis_keys(
     pattern: str = "*",
     session: AsyncSession = Depends(get_session),
 ) -> list[dict]:
-    await _require_admin(request, session)
+    await require_admin(request, session)
     r = aioredis.from_url(
         settings.redis_url, encoding="utf-8", decode_responses=True
     )
@@ -158,7 +136,7 @@ async def redis_keys(
         await r.aclose()
 
 
-# ── Redis: get key value ──────────────────────────────────────────────────────
+# -- Redis: get key value ------------------------------------------------------
 
 @router.get("/redis/keys/{key:path}")
 async def redis_get(
@@ -166,7 +144,7 @@ async def redis_get(
     request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    await _require_admin(request, session)
+    await require_admin(request, session)
     r = aioredis.from_url(
         settings.redis_url, encoding="utf-8", decode_responses=True
     )
@@ -194,7 +172,7 @@ async def redis_get(
         await r.aclose()
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# -- Helpers -------------------------------------------------------------------
 
 def _serialize_row(row: dict) -> dict[str, Any]:
     """Convert non-JSON-serializable types to strings."""

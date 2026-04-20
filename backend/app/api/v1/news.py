@@ -1,4 +1,4 @@
-"""News sentiment API — Phase 4.
+﻿"""News sentiment API — Phase 4.
 
 Endpoints
 ---------
@@ -116,7 +116,7 @@ async def get_sentiment(
                 source="cache",
             )
     except Exception as exc:
-        logger.warning("news.sentiment.cache_read_failed", error=str(exc))
+        logger.warning("news.sentiment.cache_read_failed", err=str(exc))
 
     # ── 2. DB fallback ────────────────────────────────────────────────────────
     cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=24)
@@ -174,3 +174,82 @@ async def get_feed(
         )
         for row in rows
     ]
+
+
+class LiveAnalysisResponse(BaseModel):
+    symbol: str
+    score: float
+    article_count: int
+    articles: list[NewsArticle]
+
+
+@router.post("/live-analysis", response_model=LiveAnalysisResponse)
+async def live_analysis(
+    symbol: str = Query(..., description="NSE symbol, e.g. RELIANCE"),
+    _user=Depends(get_current_user),
+):
+    """On-demand live news fetch + FinBERT scoring for a symbol.
+
+    Fetches fresh news from Google News and Yahoo Finance right now,
+    scores with FinBERT, and returns the results without persisting.
+    """
+    import asyncio
+    from app.services.news_fetcher import fetch_google_news, fetch_yahoo_finance_news
+    from app.services.ner_mapper import map_headline_to_symbols
+    from app.services.sentiment_scorer import score_headlines
+
+    sym = symbol.upper().strip()
+
+    loop = asyncio.get_running_loop()
+
+    # Fetch in background thread (blocking I/O)
+    def _fetch():
+        gn = fetch_google_news([sym], max_per_symbol=5)
+        yf = fetch_yahoo_finance_news([f"{sym}.NS"], max_per_ticker=5)
+        return gn + yf
+
+    articles = await loop.run_in_executor(None, _fetch)
+
+    if not articles:
+        raise HTTPException(status_code=404, detail=f"No fresh news found for {sym}")
+
+    # Score all
+    texts = [
+        (a["title"] + ". " + (a.get("summary") or "")).strip()
+        for a in articles
+    ]
+    scores = await loop.run_in_executor(None, score_headlines, texts)
+
+    result_articles = []
+    import uuid as _uuid
+    for article, sr in zip(articles, scores):
+        result_articles.append(NewsArticle(
+            id=str(_uuid.uuid4()),
+            symbol=sym,
+            headline=article["title"],
+            summary=article.get("summary"),
+            source=article["source"],
+            url=article.get("url"),
+            sentiment=sr.sentiment,
+            score=sr.score,
+            confidence=sr.confidence,
+            published_at=article["published"].isoformat()
+            if hasattr(article["published"], "isoformat")
+            else str(article["published"]),
+        ))
+
+    # Aggregate score
+    total_w = 0.0
+    weighted = 0.0
+    for sr in scores:
+        w = sr.confidence
+        weighted += (sr.score * 2 - 1) * w
+        total_w += w
+    agg = round(weighted / total_w, 4) if total_w else 0.0
+
+    return LiveAnalysisResponse(
+        symbol=sym,
+        score=agg,
+        article_count=len(result_articles),
+        articles=result_articles,
+    )

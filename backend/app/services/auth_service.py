@@ -1,4 +1,4 @@
-"""Authentication service — login, refresh, logout, register."""
+﻿"""Authentication service — login, refresh, logout, register."""
 from __future__ import annotations
 
 import uuid

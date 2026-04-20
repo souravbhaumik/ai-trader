@@ -8,13 +8,12 @@ from typing import Optional
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from jose import JWTError
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete as sa_delete
 
 from app.core.database import get_session
-from app.core.security import decode_access_token
+from app.api.v1.deps import require_admin
 from app.models.user import User
 from app.schemas.invite import InviteRequest, InviteListItem, InviteResponse, InviteRevokeResponse
 from app.services.invite_service import InviteService
@@ -41,29 +40,6 @@ logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 
-async def _require_admin(request: Request, session: AsyncSession) -> User:
-    """Extract Bearer token and verify caller is an active admin."""
-    auth_hdr = request.headers.get("Authorization", "")
-    if not auth_hdr.startswith("Bearer "):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing bearer token.")
-    token = auth_hdr.removeprefix("Bearer ").strip()
-    try:
-        payload = decode_access_token(token)
-    except JWTError:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired token.")
-
-    user_id = uuid.UUID(payload["sub"])
-    role = payload.get("role", "")
-    if role != "admin":
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin role required.")
-
-    result = await session.execute(select(User).where(User.id == user_id))
-    user = result.scalar_one_or_none()
-    if user is None or not user.is_active:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Account inactive.")
-    return user
-
-
 @router.post("/users/invite", response_model=InviteResponse, status_code=status.HTTP_201_CREATED)
 async def invite_user(
     body: InviteRequest,
@@ -71,7 +47,7 @@ async def invite_user(
     session: AsyncSession = Depends(get_session),
 ):
     """Create a single-use 24-hour invite for a new user (admin only)."""
-    admin = await _require_admin(request, session)
+    admin = await require_admin(request, session)
     svc = InviteService(session)
     invite, raw_token = await svc.create_invite(
         email=body.email, invited_by=admin.id
@@ -79,7 +55,7 @@ async def invite_user(
     from app.core.config import settings
     registration_url = f"{settings.frontend_url}/register?token={raw_token}"
 
-    # Send invite email in a background thread — non-blocking, failure is logged not raised
+    # Send invite email in a background thread � non-blocking, failure is logged not raised
     from app.services.email_service import send_invite_email
     threading.Thread(
         target=send_invite_email,
@@ -107,7 +83,7 @@ async def list_invites(
     session: AsyncSession = Depends(get_session),
 ):
     """Return the 50 most recent invites (admin only)."""
-    await _require_admin(request, session)
+    await require_admin(request, session)
     svc = InviteService(session)
     invites = await svc.list_invites()
     return [
@@ -131,7 +107,7 @@ async def revoke_invite(
     session: AsyncSession = Depends(get_session),
 ):
     """Revoke a pending invite (admin only). Cannot revoke used/expired invites."""
-    await _require_admin(request, session)
+    await require_admin(request, session)
     svc = InviteService(session)
     invite = await svc.revoke_invite(invite_id)
     return InviteRevokeResponse(id=invite.id, email=invite.email, status=invite.status, revoked_at=invite.revoked_at)
@@ -143,7 +119,7 @@ async def list_users(
     session: AsyncSession = Depends(get_session),
 ):
     """Return all registered users (admin only)."""
-    await _require_admin(request, session)
+    await require_admin(request, session)
     result = await session.execute(select(User).order_by(User.created_at.desc()))
     users = result.scalars().all()
     return [
@@ -168,7 +144,7 @@ async def delete_user(
     session: AsyncSession = Depends(get_session),
 ):
     """Permanently delete a user account (admin only). Admins cannot delete themselves."""
-    admin = await _require_admin(request, session)
+    admin = await require_admin(request, session)
     if admin.id == user_id:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "You cannot delete your own account from here. Use account settings instead.")
 
@@ -184,7 +160,7 @@ async def delete_user(
     return UserDeleteResponse(id=user_id, email=email, deleted=True)
 
 
-# ── Global live-trading kill switch ───────────────────────────────────────────
+# -- Global live-trading kill switch -------------------------------------------
 
 class KillSwitchResponse(BaseModel):
     disabled_count: int
@@ -194,7 +170,7 @@ class KillSwitchResponse(BaseModel):
 @router.delete(
     "/live-trading",
     response_model=KillSwitchResponse,
-    summary="Kill switch — disable live trading for ALL users immediately",
+    summary="Kill switch � disable live trading for ALL users immediately",
 )
 async def kill_switch_live_trading(
     request: Request,
@@ -205,10 +181,10 @@ async def kill_switch_live_trading(
     Also flips every user_settings row with ``trading_mode = 'live'`` back to
     ``'paper'`` so no pending order-placement tasks can slip through.
 
-    This is an irreversible batch operation — users must individually re-enable
+    This is an irreversible batch operation � users must individually re-enable
     live trading via the OTP flow.
     """
-    admin = await _require_admin(request, session)
+    admin = await require_admin(request, session)
 
     from sqlalchemy import update as sa_update, func  # noqa: PLC0415
     from datetime import datetime, timezone  # noqa: PLC0415

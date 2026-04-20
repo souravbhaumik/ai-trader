@@ -1,4 +1,4 @@
-"""Universe population Celery task.
+﻿"""Universe population Celery task.
 
 Downloads the NSE equity master list and Nifty index constituents, then
 upserts the full stock_universe table.
@@ -104,7 +104,7 @@ def _load_index_metadata() -> tuple[set[str], set[str], dict[str, tuple[str, str
         nifty50_syms = {r.get("Symbol", "").upper() for r in rows if r.get("Symbol")}
         logger.info("universe.nifty50_loaded", count=len(nifty50_syms))
     except Exception as exc:
-        logger.warning("universe.nifty50_fallback", error=str(exc))
+        logger.warning("universe.nifty50_fallback", err=str(exc))
 
     try:
         rows = _fetch_csv(_NIFTY500_URL)
@@ -118,7 +118,7 @@ def _load_index_metadata() -> tuple[set[str], set[str], dict[str, tuple[str, str
             meta[sym] = (sector, industry)
         logger.info("universe.nifty500_loaded", count=len(nifty500_syms))
     except Exception as exc:
-        logger.warning("universe.nifty500_failed", error=str(exc))
+        logger.warning("universe.nifty500_failed", err=str(exc))
 
     return nifty50_syms, nifty500_syms, meta
 
@@ -146,7 +146,7 @@ def populate_universe(nifty500_only: bool = False) -> dict:
     except Exception as exc:
         msg = f"Failed to load index metadata: {exc}"
         write_task_status(_TASK_NAME, "error", msg, started_at=started, finished_at=now_iso())
-        logger.error("universe.metadata_failed", error=str(exc))
+        logger.error("universe.metadata_failed", err=str(exc))
         return {"status": "error", "message": msg}
 
     # ── Step 2: Load full NSE equity list ────────────────────────────────────
@@ -157,7 +157,7 @@ def populate_universe(nifty500_only: bool = False) -> dict:
     except Exception as exc:
         msg = f"Failed to download NSE equity list: {exc}"
         write_task_status(_TASK_NAME, "error", msg, started_at=started, finished_at=now_iso())
-        logger.error("universe.equity_list_failed", error=str(exc))
+        logger.error("universe.equity_list_failed", err=str(exc))
         return {"status": "error", "message": msg}
 
     # ── Step 3: Filter (optionally to Nifty 500 only) ────────────────────────
@@ -225,7 +225,7 @@ def populate_universe(nifty500_only: bool = False) -> dict:
                     updated += 1
             except Exception as exc:
                 errors += 1
-                logger.debug("universe.row_error", symbol=sym, error=str(exc))
+                logger.debug("universe.row_error", symbol=sym, err=str(exc))
 
         session.commit()
 

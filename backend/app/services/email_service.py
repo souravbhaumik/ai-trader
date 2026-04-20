@@ -1,4 +1,4 @@
-"""Simple SMTP email service.
+﻿"""Simple SMTP email service.
 
 Uses Python's built-in smtplib with STARTTLS (port 587) or SSL (port 465).
 All settings come from environment variables via app.core.config.settings.
@@ -50,7 +50,7 @@ def _send(*, to: str, subject: str, html: str, text: str) -> None:
                 server.sendmail(settings.smtp_from, to, msg.as_string())
         logger.info("email.sent", to=to, subject=subject)
     except Exception as exc:
-        logger.error("email.failed", to=to, subject=subject, error=str(exc))
+        logger.error("email.failed", to=to, subject=subject, err=str(exc))
 
 
 def send_invite_email(*, to_email: str, registration_url: str, invited_by_name: str = "Admin") -> None:

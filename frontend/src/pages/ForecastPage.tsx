@@ -14,12 +14,12 @@ export default function ForecastPage() {
 
   return (
     <div className="signals-page">
-      <div className="section-header">
-        <div>
-          <h2 className="section-title">AI Forecast &amp; Anomaly</h2>
-          <p className="text-muted text-sm" style={{ marginTop: 4 }}>
+      <div className="page-header">
+        <div className="page-header-left">
+          <div className="page-header-title">AI Forecast &amp; Anomaly</div>
+          <div className="page-header-sub">
             TFT 5-day price forecast · LSTM Autoencoder anomaly detection
-          </p>
+          </div>
         </div>
       </div>
 

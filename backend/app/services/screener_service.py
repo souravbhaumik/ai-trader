@@ -1,11 +1,12 @@
-"""Screener service — live stock screener backed by the stock_universe table.
+﻿"""Screener service — live stock screener backed by the stock_universe table.
 
-Fetches live quotes for the requested page of stocks, enriches them with
-technical indicators computed from recent OHLCV data (RSI, etc.), and
-returns a ranked list.
+Fetches live quotes for the requested page of stocks via the user's configured
+broker adapter.  When no broker is configured, all price fields are 0.00 —
+EOD data is never displayed as current price.
 
-To avoid rate-limit issues, live prices are batched via the broker adapter and
-cached in Redis (30-second TTL) per adapter.
+Live prices: Angel One (per-user) → Redis cache (30s TTL) → API response.
+No broker configured = 0.00 everywhere (single source of truth rule).
+EOD prices (ohlcv_daily) are used ONLY by the ML signal engine, never here.
 """
 from __future__ import annotations
 
@@ -88,7 +89,10 @@ async def get_screener_page(
 
     symbols = [r[0] for r in rows]
 
-    # ── 2. Fetch live quotes (batch) with Redis cache ─────────────────────────
+    # ── 2. Fetch live quotes via broker adapter ───────────────────────────────
+    # Single source of truth for prices: broker adapter → Redis cache → response.
+    # NoBroker / unconfigured adapter returns [] for get_quotes_batch() so all
+    # prices stay 0.00.  ohlcv_daily is NEVER used here for display prices.
     cache_key = f"screener_quotes:{adapter.broker_name}:{','.join(sorted(symbols))}"
     quote_map: Dict[str, Any] = {}
 
@@ -105,25 +109,20 @@ async def get_screener_page(
         try:
             quotes = await adapter.get_quotes_batch(symbols)
             quote_map = {q.symbol: q.__dict__ for q in quotes}
-            if quote_map and redis:
-                try:
-                    await redis.setex(cache_key, _SCREENER_CACHE_TTL, json.dumps(quote_map))
-                except Exception:
-                    pass
         except Exception as e:
-            logger.error("screener_quotes_failed", error=str(e))
+            logger.error("screener_quotes_failed", err=str(e))
+
+        if quote_map and redis:
+            try:
+                await redis.setex(cache_key, _SCREENER_CACHE_TTL, json.dumps(quote_map))
+            except Exception:
+                pass
 
     # ── 3. Assemble result rows ───────────────────────────────────────────────
+    configured = adapter.is_credentials_configured()
     result_rows = []
     for sym, name, sector, market_cap, in_nifty50, in_nifty500 in rows:
         q_data = quote_map.get(sym, {})
-        price      = q_data.get("price", 0.0)
-        change_pct = q_data.get("change_pct", 0.0)
-        volume     = q_data.get("volume", 0)
-        high       = q_data.get("high", 0.0)
-        low        = q_data.get("low", 0.0)
-
-        configured = adapter.is_credentials_configured()
         result_rows.append({
             "symbol":       sym,
             "name":         name,
@@ -131,28 +130,37 @@ async def get_screener_page(
             "market_cap":   market_cap,
             "in_nifty50":   in_nifty50,
             "in_nifty500":  in_nifty500,
-            "price":        price if configured or adapter.broker_name == "yfinance" else 0.0,
-            "change_pct":   change_pct if configured or adapter.broker_name == "yfinance" else 0.0,
-            "volume":       volume,
-            "high":         high,
-            "low":          low,
-            "data_source":  adapter.broker_name,
-            "data_live":    configured or adapter.broker_name == "yfinance",
+            "price":        q_data.get("price", 0.0),
+            "change_pct":   q_data.get("change_pct", 0.0),
+            "volume":       q_data.get("volume", 0),
+            "high":         q_data.get("high", 0.0),
+            "low":          q_data.get("low", 0.0),
+            "data_source":  adapter.broker_name if configured else "none",
+            "data_live":    configured,
         })
 
-    # ── 4. Optional signal filter (post-process) ──────────────────────────────
+    # ── 4. Optional signal filter (join against ML signals table) ───────────
     if signal_filter and signal_filter.upper() in ("BUY", "SELL", "HOLD"):
-        # Signals are generated in Phase 3 — for now, derive a simple
-        # heuristic: BUY if change_pct > 1%, SELL if < -1%, else HOLD
         sig = signal_filter.upper()
-        def _heuristic(row: dict) -> str:
-            if row["change_pct"] > 1:
-                return "BUY"
-            if row["change_pct"] < -1:
-                return "SELL"
-            return "HOLD"
-
-        result_rows = [r for r in result_rows if _heuristic(r) == sig]
+        # Fetch latest signal per symbol from the signals table
+        try:
+            signal_rows = await db.execute(
+                text("""
+                    SELECT DISTINCT ON (symbol) symbol, signal_type
+                    FROM   signals
+                    WHERE  symbol = ANY(:syms)
+                    ORDER  BY symbol, ts DESC
+                """),
+                {"syms": [r["symbol"] for r in result_rows]},
+            )
+            signal_map = {row[0]: row[1] for row in signal_rows.fetchall()}
+            result_rows = [
+                r for r in result_rows
+                if signal_map.get(r["symbol"], "").upper() == sig
+            ]
+        except Exception as exc:
+            logger.warning("screener.signal_filter_failed", err=str(exc))
+            # Fall through without filtering if signals table doesn't exist yet
 
     return {
         "total":    total,

@@ -1,4 +1,4 @@
-"""Shared FastAPI dependencies used across multiple API modules."""
+﻿"""Shared FastAPI dependencies used across multiple API modules."""
 from __future__ import annotations
 
 import uuid
@@ -75,3 +75,32 @@ async def get_current_user_settings(
         await session.commit()
         await session.refresh(settings_row)
     return settings_row
+
+
+async def require_admin(
+    request: Request,
+    session: AsyncSession,
+) -> User:
+    """Extract Bearer token and verify caller is an active admin.
+
+    Can be called directly: ``admin = await require_admin(request, session)``
+    or as FastAPI dependency: ``Depends(require_admin)`` with ``get_session``.
+    """
+    auth_hdr = request.headers.get("Authorization", "")
+    if not auth_hdr.startswith("Bearer "):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing bearer token.")
+    token = auth_hdr.removeprefix("Bearer ").strip()
+    try:
+        payload = decode_access_token(token)
+    except JWTError:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired token.")
+
+    if payload.get("role") != "admin":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin role required.")
+
+    user_id = uuid.UUID(payload["sub"])
+    result = await session.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if user is None or not user.is_active:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Account inactive.")
+    return user

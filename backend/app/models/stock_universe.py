@@ -1,4 +1,4 @@
-﻿"""StockUniverse SQLModel — maps to the `stock_universe` table."""
+﻿"""StockUniverse SQLModel � maps to the `stock_universe` table."""
 from __future__ import annotations
 
 from datetime import datetime, timezone

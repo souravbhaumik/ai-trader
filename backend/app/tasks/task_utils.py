@@ -1,4 +1,4 @@
-"""Shared utilities for Celery tasks.
+﻿"""Shared utilities for Celery tasks.
 
 Task *status* (running / done / error / idle) is persisted in the
 ``pipeline_task_status`` PostgreSQL table — one row per task, upserted on
@@ -103,14 +103,14 @@ def write_task_status(
                 },
             )
     except Exception as exc:
-        logger.warning("task_utils.status_write_failed", task=task_name, error=str(exc))
+        logger.warning("task_utils.status_write_failed", task=task_name, err=str(exc))
 
     # Always append to the Redis log list as well (best-effort)
     try:
         r = _get_redis()
         _push_log(r, task_name, message, level="error" if status == "error" else "info")
     except Exception as exc:
-        logger.warning("task_utils.log_append_failed", task=task_name, error=str(exc))
+        logger.warning("task_utils.log_append_failed", task=task_name, err=str(exc))
 
 
 def append_task_log(task_name: str, msg: str, level: str = "info") -> None:
@@ -122,7 +122,7 @@ def append_task_log(task_name: str, msg: str, level: str = "info") -> None:
         r = _get_redis()
         _push_log(r, task_name, msg, level=level)
     except Exception as exc:
-        logger.warning("task_utils.log_append_failed", task=task_name, error=str(exc))
+        logger.warning("task_utils.log_append_failed", task=task_name, err=str(exc))
 
 
 def clear_task_logs(task_name: str) -> None:
@@ -131,7 +131,7 @@ def clear_task_logs(task_name: str) -> None:
         r = _get_redis()
         r.delete(f"{_LOG_PREFIX}{task_name}")
     except Exception as exc:
-        logger.warning("task_utils.log_clear_failed", task=task_name, error=str(exc))
+        logger.warning("task_utils.log_clear_failed", task=task_name, err=str(exc))
 
 
 def read_task_logs(task_name: str, limit: int = 200) -> list[Dict[str, Any]]:
@@ -149,7 +149,7 @@ def read_task_logs(task_name: str, limit: int = 200) -> list[Dict[str, Any]]:
                 out.append({"ts": "", "level": "info", "msg": raw})
         return out
     except Exception as exc:
-        logger.warning("task_utils.log_read_failed", task=task_name, error=str(exc))
+        logger.warning("task_utils.log_read_failed", task=task_name, err=str(exc))
         return []
 
 
@@ -185,6 +185,7 @@ def reset_interrupted_tasks() -> None:
                            message    = 'Status unknown — application restarted while task was running.',
                            updated_at = NOW()
                     WHERE  status = 'running'
+                      AND  finished_at IS NULL
                     RETURNING task_name
                 """)
             )
@@ -192,7 +193,7 @@ def reset_interrupted_tasks() -> None:
         if affected:
             logger.info("task_utils.reset_interrupted", tasks=affected)
     except Exception as exc:
-        logger.warning("task_utils.reset_interrupted_failed", error=str(exc))
+        logger.warning("task_utils.reset_interrupted_failed", err=str(exc))
 
 
 def read_all_task_statuses(task_names: list[str]) -> list[Dict[str, Any]]:
@@ -239,7 +240,7 @@ def read_all_task_statuses(task_names: list[str]) -> list[Dict[str, Any]]:
         }
         return [by_name.get(n, _idle(n)) for n in task_names]
     except Exception as exc:
-        logger.warning("task_utils.read_all_failed", error=str(exc))
+        logger.warning("task_utils.read_all_failed", err=str(exc))
         return [
             {"task_name": n, "status": "idle", "message": "DB unavailable.",
              "started_at": None, "finished_at": None, "summary": {}, "ts": None}

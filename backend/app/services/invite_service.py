@@ -1,4 +1,4 @@
-"""Invite token service."""
+﻿"""Invite token service."""
 from __future__ import annotations
 
 import uuid

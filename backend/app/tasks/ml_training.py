@@ -1,4 +1,4 @@
-"""ML training Celery task — Phase 3.
+﻿"""ML training Celery task — Phase 3.
 
 Triggered manually by admin or on a weekly schedule.
 Runs LightGBM training and optionally logs to MLflow.
@@ -44,7 +44,7 @@ def train_model(self, **kwargs) -> dict[str, Any]:
         result = train_lgbm(**kwargs)
     except Exception as exc:
         msg = f"Training failed: {exc}"
-        logger.error("ml_training.failed", error=str(exc))
+        logger.error("ml_training.failed", err=str(exc))
         write_task_status(_TASK, "error", msg, started_at=started, finished_at=now_iso())
         raise
 
@@ -96,4 +96,4 @@ def _log_to_mlflow(result: dict) -> None:
         logger.info("ml_training.mlflow_logged", run_id=run_id)
 
     except Exception as exc:
-        logger.warning("ml_training.mlflow_failed", error=str(exc))
+        logger.warning("ml_training.mlflow_failed", err=str(exc))

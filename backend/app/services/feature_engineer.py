@@ -1,4 +1,4 @@
-"""Feature engineering service — Phase 3.
+﻿"""Feature engineering service — Phase 3.
 
 Builds a flat feature vector per symbol from:
   - OHLCV technical indicators  (RSI, MACD, Bollinger, ATR, OBV, ADX)
@@ -256,6 +256,6 @@ async def build_features_for_symbol(
             data = json.loads(raw)
             sentiment = float(data.get("score", 0.0))
     except Exception as exc:
-        logger.warning("feature_engineer.sentiment_fetch_failed", symbol=symbol, error=str(exc))
+        logger.warning("feature_engineer.sentiment_fetch_failed", symbol=symbol, err=str(exc))
 
     return build_features(symbol, closes, highs, lows, volumes, sentiment)

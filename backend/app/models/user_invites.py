@@ -1,4 +1,4 @@
-﻿"""UserInvite SQLModel — maps to the `user_invites` table."""
+﻿"""UserInvite SQLModel � maps to the `user_invites` table."""
 from __future__ import annotations
 
 import uuid

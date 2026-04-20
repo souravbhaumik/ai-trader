@@ -1,4 +1,4 @@
-"""News fetcher service — Phase 4.
+﻿"""News fetcher service — Phase 4.
 
 Fetches headlines from multiple free sources and returns them as a flat
 list of dicts ready for NER + FinBERT scoring.
@@ -49,9 +49,9 @@ def _parse_dt(raw: Any) -> datetime | None:
     if raw is None:
         return None
     try:
-        import time as _time
+        import calendar as _cal
         if hasattr(raw, "tm_year"):                  # feedparser time_struct
-            ts = _time.mktime(raw)
+            ts = _cal.timegm(raw)                    # interpret as UTC, not local
             return datetime.fromtimestamp(ts, tz=timezone.utc)
         return datetime.fromisoformat(str(raw)).astimezone(timezone.utc)
     except Exception:
@@ -105,7 +105,7 @@ def fetch_rss() -> list[dict]:
                     "source":    source,
                 })
         except Exception as exc:
-            logger.warning("news_fetcher.rss_failed", source=source, error=str(exc))
+            logger.warning("news_fetcher.rss_failed", source=source, err=str(exc))
 
     logger.info("news_fetcher.rss_done", count=len(articles))
     return articles
@@ -165,7 +165,7 @@ def fetch_yahoo_finance_news(tickers: list[str], max_per_ticker: int = 5) -> lis
                     "_ticker":   ticker_code,
                 })
         except Exception as exc:
-            logger.warning("news_fetcher.yfinance_failed", ticker=ticker_code, error=str(exc))
+            logger.warning("news_fetcher.yfinance_failed", ticker=ticker_code, err=str(exc))
 
     logger.info("news_fetcher.yfinance_done", count=len(articles))
     return articles
@@ -186,7 +186,10 @@ def fetch_google_news(symbols: list[str], max_per_symbol: int = 5) -> list[dict]
     gn = GNews(language="en", country="IN", period="1d", max_results=max_per_symbol)
     articles: list[dict] = []
 
-    for query in symbols:
+    import time as _t
+    for i, query in enumerate(symbols):
+        if i > 0 and i % 5 == 0:
+            _t.sleep(1.0)  # Rate-limit: 5 queries per second max
         try:
             results = gn.get_news(query)
             for item in results:
@@ -202,7 +205,7 @@ def fetch_google_news(symbols: list[str], max_per_symbol: int = 5) -> list[dict]
                     "_query":    query,   # temp field: NER mapper uses this as a hint
                 })
         except Exception as exc:
-            logger.warning("news_fetcher.gnews_failed", query=query, error=str(exc))
+            logger.warning("news_fetcher.gnews_failed", query=query, err=str(exc))
 
     logger.info("news_fetcher.gnews_done", count=len(articles))
     return articles

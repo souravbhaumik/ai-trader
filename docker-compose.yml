@@ -14,9 +14,13 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./db_init:/docker-entrypoint-initdb.d:ro
     ports:
-      - "5433:5432"   # 5433 avoids conflict with local Postgres
+      - "5433:5432" # 5433 avoids conflict with local Postgres
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-aitrader} -d ${DB_NAME:-aitrader}"]
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${DB_USER:-aitrader} -d ${DB_NAME:-aitrader}",
+        ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -66,6 +70,7 @@ services:
       DB_PORT: 5432
       REDIS_HOST: redis
       REDIS_PORT: 6379
+      MLFLOW_TRACKING_URI: http://mlflow:5000
     ports:
       - "8000:8000"
     depends_on:
@@ -76,8 +81,8 @@ services:
       db-migrate:
         condition: service_completed_successfully
     volumes:
-      - ./backend:/app       # hot-reload in dev (removed in prod)
-      - trained_models_data:/app/models   # shared with celery-worker
+      - ./backend:/app # hot-reload in dev (removed in prod)
+      - trained_models_data:/app/models # shared with celery-worker
     command: >
       sh -c "PYTHONPATH=/app uvicorn app.main:app --host 0.0.0.0 --port 8000"
 
@@ -93,6 +98,7 @@ services:
       DB_PORT: 5432
       REDIS_HOST: redis
       REDIS_PORT: 6379
+      MLFLOW_TRACKING_URI: http://mlflow:5000
     depends_on:
       postgres:
         condition: service_healthy
@@ -102,11 +108,11 @@ services:
         condition: service_completed_successfully
     volumes:
       - ./backend:/app
-      - trained_models_data:/app/models   # shared with backend
+      - trained_models_data:/app/models # shared with backend
       - hf_model_cache:/root/.cache/huggingface
     command: >
       sh -c "PYTHONPATH=/app celery -A app.tasks.celery_app worker
-      --loglevel=info --concurrency=2 -Q celery"
+      --loglevel=info --concurrency=2 -Q celery,low_priority"
 
   # ── Celery Beat (periodic task scheduler) ─────────────────────────────────
   celery-beat:
@@ -150,8 +156,29 @@ services:
     volumes:
       - ./backend:/app
     command: >
-      sh -c "PYTHONPATH=/app celery -A app.tasks.celery_app flower
+      sh -c "PYTHONPATH=/app FLOWER_UNAUTHENTICATED_API=true celery -A app.tasks.celery_app flower
       --port=5555 --broker_api=redis://:${REDIS_PASSWORD}@redis:6379/1"
+
+  # ── MLflow Tracking Server ──────────────────────────────────────────────────
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.14.1
+    restart: unless-stopped
+    environment:
+      MLFLOW_BACKEND_STORE_URI: "postgresql://${DB_USER:-aitrader}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-aitrader}"
+      MLFLOW_DEFAULT_ARTIFACT_ROOT: /mlflow/artifacts
+    volumes:
+      - mlflow_artifacts:/mlflow/artifacts
+    ports:
+      - "5001:5000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri "postgresql://${DB_USER:-aitrader}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-aitrader}"
+      --default-artifact-root /mlflow/artifacts
 
   # ── Vite Frontend (dev server) ─────────────────────────────────────────────
   frontend:
@@ -169,9 +196,18 @@ services:
     depends_on:
       - backend
 
+  # ── Cloudflare Tunnel (stable webhook URL for broker postbacks) ───────────
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    depends_on:
+      - backend
+    command: tunnel --no-autoupdate --url http://backend:8000
+
 volumes:
   postgres_data:
   redis_data:
   celery_beat_data:
   hf_model_cache:
-  trained_models_data:   # LightGBM .pkl artifacts shared between backend + celery-worker
+  trained_models_data: # LightGBM .pkl artifacts shared between backend + celery-worker
+  mlflow_artifacts: # MLflow experiment artifacts
