@@ -31,6 +31,11 @@ FEATURE_NAMES: list[str] = [
     "close_vs_sma20",    # (close - SMA20) / SMA20
     "close_vs_sma50",    # (close - SMA50) / SMA50
     "sentiment_score",   # Phase 4 rolling 24-h weighted sentiment [-1, 1]
+    # Phase 3b additions — added without breaking old models (appended at end)
+    "momentum_1m",       # 21-bar price return: (close[-1] / close[-22]) - 1
+    "momentum_3m",       # 63-bar price return: (close[-1] / close[-64]) - 1
+    "hist_vol_20d",      # 20-day realised volatility (annualised std of log returns)
+    "week52_proximity",  # (close - 52w_low) / (52w_high - 52w_low); 0=at low, 1=at high
 ]
 
 
@@ -153,6 +158,38 @@ def _sma_ratio(closes: np.ndarray, period: int) -> float:
     return float((closes[-1] - sma) / sma)
 
 
+def _momentum(closes: np.ndarray, lookback: int) -> float:
+    """Simple price momentum: (close[-1] / close[-lookback-1]) - 1."""
+    if len(closes) < lookback + 1:
+        return float("nan")
+    base = closes[-(lookback + 1)]
+    if base <= 0:
+        return float("nan")
+    return float(closes[-1] / base - 1)
+
+
+def _hist_vol_20d(closes: np.ndarray) -> float:
+    """20-day realised volatility (annualised std of daily log returns)."""
+    if len(closes) < 21:
+        return float("nan")
+    log_rets = np.diff(np.log(closes[-21:]))
+    std_daily = float(np.std(log_rets, ddof=1))
+    return std_daily * np.sqrt(252)   # annualise
+
+
+def _week52_proximity(closes: np.ndarray) -> float:
+    """Position of current close within the 52-week high/low range [0, 1]."""
+    if len(closes) < 252:
+        window = closes          # use all available if < 1 year
+    else:
+        window = closes[-252:]
+    lo  = float(window.min())
+    hi  = float(window.max())
+    if hi == lo:
+        return 0.5
+    return float((closes[-1] - lo) / (hi - lo))
+
+
 def _volume_ratio(volumes: np.ndarray, period: int = 20) -> float:
     if len(volumes) < period + 1:
         return float("nan")
@@ -205,6 +242,11 @@ def build_features(
         "close_vs_sma20": _sma_ratio(c, 20),
         "close_vs_sma50": _sma_ratio(c, 50),
         "sentiment_score": float(sentiment_score) if sentiment_score is not None else 0.0,
+        # Phase 3b — momentum / volatility / 52-week range
+        "momentum_1m":       _momentum(c, 21),
+        "momentum_3m":       _momentum(c, 63),
+        "hist_vol_20d":      _hist_vol_20d(c),
+        "week52_proximity":  _week52_proximity(c),
     }
 
     valid = sum(1 for v in feats.values() if not math.isnan(v))

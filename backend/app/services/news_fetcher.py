@@ -27,18 +27,42 @@ logger = structlog.get_logger(__name__)
 
 # ── RSS feed catalogue ────────────────────────────────────────────────────────
 _RSS_FEEDS: dict[str, str] = {
+    # India equity / business
     "et_markets":     "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",
     "moneycontrol":   "https://www.moneycontrol.com/rss/latestnews.xml",
     "business_std":   "https://www.business-standard.com/rss/markets-106.rss",
     "livemint":       "https://www.livemint.com/rss/markets",
     "nse_corp":       "https://www.nseindia.com/corporates/rss/allAnnouncements.xml",
     "bse_corp":       "https://api.bseindia.com/BseIndiaAPI/api/RssFeed/w?flag=13",
-    # Additional sources for broader coverage
     "hindu_bl":       "https://www.thehindubusinessline.com/markets/?service=rss",
     "financial_exp":  "https://www.financialexpress.com/market/feed/",
     "ndtv_profit":    "https://feeds.feedburner.com/ndtvprofit-latest",
     "zee_biz":        "https://www.zeebiz.com/rss",
+    # Global wire services — for macro / geopolitical events
+    "reuters_markets": "https://feeds.reuters.com/reuters/businessNews",
+    "reuters_world":   "https://feeds.reuters.com/Reuters/worldNews",
+    "ap_business":     "https://rsshub.app/ap/topics/business-news",
+    "investing_com":   "https://www.investing.com/rss/news_25.rss",
 }
+
+# ── Macro Google News queries ──────────────────────────────────────────────────
+# These are fired in `fetch_macro_news()` to capture geopolitical events that
+# are not symbol-specific (they are scored by macro_news_scorer, not NER-mapped
+# to individual equity symbols).
+_MACRO_QUERIES: list[str] = [
+    "Federal Reserve interest rate decision",
+    "RBI monetary policy India",
+    "India GDP growth economy",
+    "US tariffs India trade",
+    "crude oil price OPEC",
+    "Russia Ukraine war economy sanctions",
+    "China India trade geopolitical",
+    "US dollar rupee exchange rate",
+    "India inflation CPI",
+    "global recession risk",
+    "Trump tariff policy",
+    "FII FPI India outflow inflow",
+]
 
 # Max hours in the past to consider an article "fresh"
 _MAX_AGE_HOURS = 24
@@ -208,4 +232,49 @@ def fetch_google_news(symbols: list[str], max_per_symbol: int = 5) -> list[dict]
             logger.warning("news_fetcher.gnews_failed", query=query, err=str(exc))
 
     logger.info("news_fetcher.gnews_done", count=len(articles))
+    return articles
+
+
+def fetch_macro_news(max_per_query: int = 5) -> list[dict]:
+    """Fetch global macro / geopolitical headlines via Google News.
+
+    Results are tagged with ``_macro=True`` so the NER mapper skips them
+    (they don't map to individual NSE symbols).  The macro_news_scorer reads
+    these articles directly.
+    """
+    try:
+        from gnews import GNews
+    except ImportError:
+        logger.error("news_fetcher.gnews_import_error", pkg="gnews")
+        return []
+
+    gn = GNews(language="en", country="US", period="1d", max_results=max_per_query)
+    articles: list[dict] = []
+
+    import time as _t
+    for i, query in enumerate(_MACRO_QUERIES):
+        if i > 0 and i % 5 == 0:
+            _t.sleep(1.0)
+        try:
+            results = gn.get_news(query)
+            for item in results:
+                published = _parse_dt(item.get("published date"))
+                if not _is_fresh(published):
+                    continue
+                title = item.get("title", "").strip()
+                if not title:
+                    continue
+                articles.append({
+                    "title":     title,
+                    "summary":   (item.get("description") or "")[:800] or None,
+                    "url":       item.get("url"),
+                    "published": published or datetime.now(tz=timezone.utc),
+                    "source":    "macro_news",
+                    "_macro":    True,   # flag: do not NER-map to individual symbols
+                    "_query":    query,
+                })
+        except Exception as exc:
+            logger.warning("news_fetcher.macro_gnews_failed", query=query, err=str(exc))
+
+    logger.info("news_fetcher.macro_done", count=len(articles))
     return articles

@@ -35,7 +35,16 @@ _SENTIMENT_TTL_SECS   = 7200   # 2 hours
 _ROLLING_WINDOW_HOURS = 24
 
 
-@celery_app.task(name="app.tasks.news_sentiment.fetch_news_sentiment", bind=True)
+@celery_app.task(
+    name="app.tasks.news_sentiment.fetch_news_sentiment",
+    bind=True,
+    max_retries=3,
+    default_retry_delay=120,      # 2-minute back-off between retries
+    autoretry_for=(Exception,),   # retry on any uncaught exception
+    retry_backoff=True,           # exponential back-off: 120s, 240s, 480s
+    retry_backoff_max=600,
+    retry_jitter=True,
+)
 def fetch_news_sentiment(self):
     """Fetch, NER-map, score, persist, and cache news sentiment."""
     from app.services.news_fetcher   import fetch_rss, fetch_google_news, fetch_yahoo_finance_news
@@ -43,14 +52,20 @@ def fetch_news_sentiment(self):
     from app.services.sentiment_scorer import score_headlines
 
     # ── 1. Ensure NER universe is warm ────────────────────────────────────────
-    _ensure_universe()
+    try:
+        _ensure_universe()
+    except Exception as exc:
+        logger.warning("news_task.ner_universe_warm_failed", err=str(exc))
+        # Non-fatal: NER will still work with whatever universe is cached
 
     # ── 2. Fetch headlines ────────────────────────────────────────────────────
-    rss_articles    = fetch_rss()
-    # Pass the 50 most mentioned company names as Google News queries
-    # (lightweight — we don't want to send 500 queries per run)
+    # RSS feeds run per-feed with isolation — one broken feed never stops others
+    rss_articles = fetch_rss()
+
+    # Google News + Yahoo Finance — wrapped independently
     gn_articles: list[dict] = []
     yf_articles: list[dict] = []
+    macro_articles: list[dict] = []
     try:
         with get_sync_session() as session:
             rows = session.execute(
@@ -62,12 +77,28 @@ def fetch_news_sentiment(self):
             ).fetchall()
         top_names   = [r[0] + ".NS" for r in rows]  # Yahoo needs .NS suffix
         top_queries = [r[1] for r in rows]           # Google needs company name
+    except Exception as exc:
+        logger.warning("news_task.db_top_names_failed", err=str(exc))
+        top_names = []
+        top_queries = []
+
+    try:
         gn_articles = fetch_google_news(top_queries, max_per_symbol=3)
+    except Exception as exc:
+        logger.warning("news_task.google_news_failed", err=str(exc))
+
+    try:
         yf_articles = fetch_yahoo_finance_news(top_names, max_per_ticker=5)
     except Exception as exc:
-        logger.warning("news_task.fetch_failed", err=str(exc))
+        logger.warning("news_task.yahoo_news_failed", err=str(exc))
 
-    all_articles: list[dict] = rss_articles + gn_articles + yf_articles
+    try:
+        from app.services.news_fetcher import fetch_macro_news
+        macro_articles = fetch_macro_news()
+    except Exception as exc:
+        logger.warning("news_task.macro_news_failed", err=str(exc))
+
+    all_articles: list[dict] = rss_articles + gn_articles + yf_articles + macro_articles
     if not all_articles:
         logger.info("news_task.no_articles")
         return {"status": "done", "inserted": 0}
@@ -208,6 +239,15 @@ def fetch_news_sentiment(self):
 
     # ── 7. Recompute rolling sentiment cache in Redis ─────────────────────────
     _update_sentiment_cache(rows, now_utc)
+
+    # ── 8. Update global macro news score (for regime detector) ───────────────
+    try:
+        from app.services.macro_news_scorer import score_macro_headlines
+        all_texts = [r["headline"] for r in rows if r.get("headline")]
+        if all_texts:
+            score_macro_headlines(all_texts)
+    except Exception as exc:
+        logger.warning("news_task.macro_score_failed", err=str(exc))
 
     logger.info("news_task.done", inserted=inserted, total_mapped=len(rows))
     return {"status": "done", "inserted": inserted, "total_mapped": len(rows)}

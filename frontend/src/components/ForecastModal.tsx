@@ -1,7 +1,7 @@
-import { useRef, useEffect } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useRef, useEffect, useState } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { createChart, LineSeries, IChartApi, ISeriesApi, LineData } from 'lightweight-charts'
-import { TrendingUp, AlertTriangle, X, Loader, Info } from 'lucide-react'
+import { TrendingUp, AlertTriangle, X, Loader, Info, RefreshCw } from 'lucide-react'
 import { apiClient } from '../api/client'
 
 // ── API shapes ────────────────────────────────────────────────────────────────
@@ -18,6 +18,12 @@ interface NewsArticle {
   source: string; url: string | null; sentiment: string
   score: number; confidence: number; published_at: string
 }
+interface SignalRefreshResponse {
+  id: string; symbol: string; ts: string; signal_type: string
+  confidence: number; entry_price: number | null; target_price: number | null
+  stop_loss: number | null; model_version: string; is_active: boolean
+  sentiment_score: number; refreshed: boolean
+}
 
 // ── Chip ──────────────────────────────────────────────────────────────────────
 export function Chip({ label, value, color, muted }: { label: string; value: string; color?: string; muted?: boolean }) {
@@ -27,6 +33,14 @@ export function Chip({ label, value, color, muted }: { label: string; value: str
       <span style={{ fontSize: 13, fontWeight: 600, color: color ?? (muted ? 'var(--text-muted)' : 'var(--text)'), fontFamily: 'monospace' }}>{value}</span>
     </div>
   )
+}
+
+// ── Age formatter ─────────────────────────────────────────────────────────────
+function _ageLabel(isoStr: string): string {
+  const diff = Math.floor((Date.now() - new Date(isoStr).getTime()) / 1000)
+  if (diff < 60)  return `${diff}s ago`
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
+  return `${Math.floor(diff / 3600)}h ago`
 }
 
 // ── Chart ─────────────────────────────────────────────────────────────────────
@@ -115,6 +129,11 @@ interface Props { symbol: string | null; onClose: () => void }
 
 export default function ForecastModal({ symbol, onClose }: Props) {
   const encoded = symbol ? encodeURIComponent(symbol) : ''
+  const queryClient = useQueryClient()
+  const [refreshing, setRefreshing] = useState(false)
+  const [refreshError, setRefreshError] = useState<string | null>(null)
+  const [freshSignal, setFreshSignal] = useState<SignalRefreshResponse | null>(null)
+
   const { data: forecast, isLoading: loadingFc, error: fcErr } = useQuery<ForecastResponse>({
     queryKey: ['forecast', symbol],
     queryFn: () => apiClient.get<ForecastResponse>(`/forecasts/${encoded}`).then(r => r.data),
@@ -133,6 +152,33 @@ export default function ForecastModal({ symbol, onClose }: Props) {
     enabled: !!symbol,
     retry: false,
   })
+
+  // Detect stale news (oldest article in feed > 60 min)
+  const newsIsStale = newsFeed && newsFeed.length > 0
+    ? (Date.now() - new Date(newsFeed[0].published_at).getTime()) > 60 * 60 * 1000
+    : false
+
+  const handleRefresh = async () => {
+    if (!symbol || refreshing) return
+    const sym = symbol.replace('.NS', '')
+    setRefreshing(true)
+    setRefreshError(null)
+    try {
+      const res = await apiClient.post<SignalRefreshResponse>(`/signals/${encodeURIComponent(sym)}/refresh`)
+      setFreshSignal(res.data)
+      // Invalidate the news feed query so it reloads fresh articles
+      queryClient.invalidateQueries({ queryKey: ['news-feed', symbol] })
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { detail?: string }; status?: number } }
+      if (err.response?.status === 429) {
+        setRefreshError(err.response?.data?.detail ?? 'Rate limited. Please wait before refreshing again.')
+      } else {
+        setRefreshError(err.response?.data?.detail ?? 'Refresh failed. Please try again.')
+      }
+    } finally {
+      setRefreshing(false)
+    }
+  }
 
   if (!symbol) return null
 
@@ -153,12 +199,62 @@ export default function ForecastModal({ symbol, onClose }: Props) {
             <div style={{ fontWeight: 700, fontSize: 18 }}>{displaySym} — AI Forecast & Anomaly</div>
             <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>TFT 5-day price forecast · LSTM Autoencoder anomaly detection</div>
           </div>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: 4 }}>
-            <X size={20} />
-          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            {/* Refresh button */}
+            <button
+              onClick={handleRefresh}
+              disabled={refreshing}
+              title="Refresh signal: fetches latest news + recomputes signal"
+              style={{
+                display: 'flex', alignItems: 'center', gap: 6,
+                background: refreshing ? 'var(--bg-hover)' : 'var(--accent)',
+                border: '1px solid var(--border)', borderRadius: 8,
+                padding: '6px 12px', cursor: refreshing ? 'not-allowed' : 'pointer',
+                color: refreshing ? 'var(--text-muted)' : '#fff',
+                fontSize: 12, fontWeight: 600, transition: 'all 0.2s',
+              }}
+            >
+              <RefreshCw size={13} style={{ animation: refreshing ? 'spin 1s linear infinite' : 'none' }} />
+              {refreshing ? 'Refreshing…' : '↻ Refresh Signal'}
+            </button>
+            <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: 4 }}>
+              <X size={20} />
+            </button>
+          </div>
         </div>
 
         <div style={{ padding: 24, display: 'flex', flexDirection: 'column', gap: 24 }}>
+
+          {/* Refresh error banner */}
+          {refreshError && (
+            <div style={{ padding: '10px 14px', background: 'rgba(239,68,68,0.1)', border: '1px solid var(--red)', borderRadius: 8, fontSize: 13, color: 'var(--red)' }}>
+              {refreshError}
+            </div>
+          )}
+
+          {/* Stale news warning banner */}
+          {newsIsStale && !freshSignal && (
+            <div style={{ padding: '10px 14px', background: 'rgba(234,179,8,0.1)', border: '1px solid var(--yellow)', borderRadius: 8, fontSize: 12, color: 'var(--yellow)', display: 'flex', gap: 8, alignItems: 'center' }}>
+              <AlertTriangle size={14} style={{ flexShrink: 0 }} />
+              <span>News data may be stale (latest article is over 1 hour old). Click <strong>↻ Refresh Signal</strong> to fetch the latest headlines and recompute the signal.</span>
+            </div>
+          )}
+
+          {/* Freshly refreshed signal banner */}
+          {freshSignal && (
+            <div style={{ padding: '12px 16px', background: 'rgba(34,197,94,0.1)', border: '1px solid var(--green)', borderRadius: 10, fontSize: 13 }}>
+              <div style={{ fontWeight: 700, color: 'var(--green)', marginBottom: 6 }}>✓ Signal refreshed {_ageLabel(freshSignal.ts)}</div>
+              <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                <Chip label="Direction" value={freshSignal.signal_type} color={freshSignal.signal_type === 'BUY' ? 'var(--green)' : 'var(--red)'} />
+                <Chip label="Confidence" value={`${(freshSignal.confidence * 100).toFixed(1)}%`} />
+                {freshSignal.entry_price != null && <Chip label="Entry" value={`₹${freshSignal.entry_price.toFixed(2)}`} />}
+                {freshSignal.target_price != null && <Chip label="Target" value={`₹${freshSignal.target_price.toFixed(2)}`} color="var(--green)" />}
+                {freshSignal.stop_loss != null && <Chip label="Stop Loss" value={`₹${freshSignal.stop_loss.toFixed(2)}`} color="var(--red)" />}
+                <Chip label="Sentiment" value={freshSignal.sentiment_score >= 0.1 ? '▲ Positive' : freshSignal.sentiment_score <= -0.1 ? '▼ Negative' : '● Neutral'} color={freshSignal.sentiment_score >= 0.1 ? 'var(--green)' : freshSignal.sentiment_score <= -0.1 ? 'var(--red)' : 'var(--text-muted)'} />
+                <Chip label="Model" value={freshSignal.model_version} muted />
+              </div>
+            </div>
+          )}
 
           {/* TFT forecast section */}
           <div className="settings-section">
@@ -290,7 +386,9 @@ export default function ForecastModal({ symbol, onClose }: Props) {
                     nse_corp: 'NSE', bse_corp: 'BSE', google_news: 'Google News',
                     yahoo_finance: 'Yahoo Finance', hindu_bl: 'Business Line',
                     financial_exp: 'Financial Express', ndtv_profit: 'NDTV Profit',
-                    zee_biz: 'Zee Business',
+                    zee_biz: 'Zee Business', reuters_markets: 'Reuters Markets',
+                    reuters_world: 'Reuters World', ap_business: 'AP Business',
+                    investing_com: 'Investing.com', macro_news: 'Global Macro',
                   }
                   return (
                     <div key={article.id} style={{ background: 'var(--bg-hover)', border: '1px solid var(--border)', borderRadius: 10, padding: '12px 14px' }}>

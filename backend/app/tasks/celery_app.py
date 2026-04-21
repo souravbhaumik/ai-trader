@@ -37,6 +37,7 @@ celery_app = Celery(
         "app.tasks.intraday_ingest",
         "app.tasks.intraday_signal_generator",
         "app.tasks.upstox_token_refresh",
+        "app.tasks.fundamentals_ingest",
     ],
 )
 
@@ -78,6 +79,12 @@ celery_app.conf.beat_schedule = {
         "task":     "app.tasks.signal_outcome_evaluation.evaluate_signal_outcomes",
         "schedule": crontab(hour=17, minute=0, day_of_week="1-5"),  # Mon–Fri 5:00 PM IST
     },
+    # Signal outcome morning fill — 8:20 AM IST (fills prev-day actual prices from bhavcopy)
+    # Runs before signal generation (8:30 AM) so analytics are fresh at open.
+    "signal-outcome-morning": {
+        "task":     "app.tasks.signal_outcome_evaluation.evaluate_signal_outcomes",
+        "schedule": crontab(hour=8, minute=20, day_of_week="1-5"),  # Mon–Fri 8:20 AM IST
+    },
     # News sentiment pipeline — every 15 min during market hours
     "news-sentiment-pipeline": {
         "task":     "app.tasks.news_sentiment.fetch_news_sentiment",
@@ -109,20 +116,16 @@ celery_app.conf.beat_schedule = {
         "task":     "app.tasks.intraday_ingest.ingest_intraday",
         "schedule": crontab(hour="9-15", minute="*/15", day_of_week="1-5"),
     },
-    # Intraday signal — 9:30 AM (opening bar established)
-    "intraday-signal-0930": {
+    # Intraday signals — every 15 min from 9:30 AM to 3:15 PM IST
+    # (9:15 AM opening bar is too thin; 3:30 PM close is handled by EOD)
+    "intraday-signal-15min": {
         "task":     "app.tasks.intraday_signal_generator.generate_intraday_signals",
-        "schedule": crontab(hour=9, minute=30, day_of_week="1-5"),
+        "schedule": crontab(hour="9-15", minute="30,45,0,15", day_of_week="1-5"),
     },
-    # Intraday signal — 11:00 AM (morning trend confirmation)
-    "intraday-signal-1100": {
-        "task":     "app.tasks.intraday_signal_generator.generate_intraday_signals",
-        "schedule": crontab(hour=11, minute=0, day_of_week="1-5"),
-    },
-    # Intraday signal — 1:00 PM (half-day trend)
-    "intraday-signal-1300": {
-        "task":     "app.tasks.intraday_signal_generator.generate_intraday_signals",
-        "schedule": crontab(hour=13, minute=0, day_of_week="1-5"),
+    # Fundamentals refresh — daily at 7:00 AM IST (pre-market, uses yfinance)
+    "fundamentals-daily": {
+        "task":     "app.tasks.fundamentals_ingest.refresh_fundamentals",
+        "schedule": crontab(hour=7, minute=0, day_of_week="1-5"),
     },
     # Upstox token validity check — 7:30 AM (before market open)
     "upstox-token-check": {

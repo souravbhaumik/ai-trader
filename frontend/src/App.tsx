@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { BrowserRouter, Routes, Route, NavLink, Navigate } from 'react-router-dom'
 import { Toaster } from 'react-hot-toast'
 import toast from 'react-hot-toast'
-import { Cpu, LayoutDashboard, Settings, Terminal, BarChart2, Zap, LogOut, Briefcase, TrendingUp, BookOpen } from 'lucide-react'
+import { Cpu, LayoutDashboard, Settings, Terminal, BarChart2, Zap, LogOut, Briefcase, TrendingUp, BookOpen, Activity } from 'lucide-react'
 import { useAuthStore } from './store/authStore'
 import { apiClient } from './api/client'
 import LoginPage from './pages/LoginPage'
@@ -15,6 +15,7 @@ import ScreenerPage from './pages/ScreenerPage'
 import LivePortfolioPage from './pages/LivePortfolioPage'
 import ForecastPage from './pages/ForecastPage'
 import PaperTradingPage from './pages/PaperTradingPage'
+import SignalAnalyticsPage from './pages/SignalAnalyticsPage'
 
 // ── Auth guard ────────────────────────────────────────────────────────────────
 function RequireAuth({ children }: { children: React.ReactNode }) {
@@ -129,6 +130,9 @@ function AppLayout() {
         <NavLink to="/forecast" className={({ isActive }) => `sidebar-nav-item ${isActive ? 'active' : ''}`} title="AI Forecast">
           <TrendingUp size={20} />
         </NavLink>
+        <NavLink to="/analytics" className={({ isActive }) => `sidebar-nav-item ${isActive ? 'active' : ''}`} title="Signal Analytics">
+          <Activity size={20} />
+        </NavLink>
         {isAdmin() && (
           <NavLink to="/admin" className={({ isActive }) => `sidebar-nav-item ${isActive ? 'active' : ''}`} title="Pipeline">
             <Terminal size={20} />
@@ -148,8 +152,7 @@ function AppLayout() {
           <Route path="/signals"       element={<SignalLogPage />} />
           <Route path="/paper"         element={<PaperTradingPage />} />
           <Route path="/live"          element={<LivePortfolioPage />} />
-          <Route path="/forecast"      element={<ForecastPage />} />
-          <Route path="/admin"         element={<RequireAdmin><AdminPage /></RequireAdmin>} />
+          <Route path="/forecast"      element={<ForecastPage />} />          <Route path="/analytics"     element={<SignalAnalyticsPage />} />          <Route path="/admin"         element={<RequireAdmin><AdminPage /></RequireAdmin>} />
           <Route path="/settings"      element={<SettingsPage />} />
         </Routes>
       </main>

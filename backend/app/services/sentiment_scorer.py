@@ -22,7 +22,7 @@ import structlog
 logger = structlog.get_logger(__name__)
 
 _FINBERT_MODEL  = "ProsusAI/finbert"
-_BATCH_SIZE     = 32
+_BATCH_SIZE     = 64    # RTX 3050 4 GB VRAM comfortably handles 64 FP16 sequences
 _MAX_LENGTH     = 512   # BERT hard limit; we chunk longer texts
 _CHUNK_STRIDE   = 384   # token overlap window (128-token overlap)
 
@@ -49,11 +49,26 @@ def _get_pipeline():
                     device = os.getenv("SENTIMENT_DEVICE", "cpu")
                     if device == "cuda" and not torch.cuda.is_available():
                         device = "cpu"
+                        logger.warning("finbert.cuda_unavailable", fallback="cpu")
+
+                    # RTX 3050 GPU optimisations: TF32 matmuls + FP16 weights
+                    # Both are backward-compatible; on CPU these are no-ops.
+                    if device.startswith("cuda") and torch.cuda.is_available():
+                        torch.backends.cuda.matmul.allow_tf32 = True
+                        torch.backends.cudnn.allow_tf32       = True
+
+                    dtype = (
+                        torch.float16
+                        if device.startswith("cuda") and torch.cuda.is_available()
+                        else torch.float32
+                    )
+
                     _PIPELINE = pipeline(
                         "text-classification",
                         model=_FINBERT_MODEL,
                         tokenizer=_FINBERT_MODEL,
                         device=device,
+                        torch_dtype=dtype,       # FP16 on GPU → ~2× throughput
                         truncation=False,        # we handle chunking manually
                         max_length=_MAX_LENGTH,
                         top_k=None,              # return all three labels

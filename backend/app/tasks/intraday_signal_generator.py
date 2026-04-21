@@ -300,6 +300,66 @@ def generate_intraday_signals():
                         features["sentiment_score"] = round(sentiment, 4)
                         features["blend_score"]     = round(blended, 4)
 
+                # ── Phase 3b: Fundamentals score ──────────────────────────────
+                try:
+                    from app.services.fundamentals_service import (
+                        get_fundamentals_from_cache, score_fundamentals,
+                    )
+                    import redis as _redis_fund
+                    from app.core.config import settings as _cfg_fund
+                    _rf = _redis_fund.from_url(_cfg_fund.redis_url, decode_responses=True)
+                    fund_data = get_fundamentals_from_cache(sym, redis_client=_rf)
+                    if fund_data:
+                        fund_score = score_fundamentals(fund_data)
+                        direction_multiplier = 1.0 if final_dir == "BUY" else -1.0
+                        fund_bump = direction_multiplier * fund_score * 0.05
+                        final_conf = max(0.0, min(1.0, final_conf + fund_bump))
+                        features["fundamentals_score"] = round(fund_score, 4)
+                except Exception:  # noqa: BLE001
+                    pass
+
+                # ── Phase 6: River ARF online model ───────────────────────────
+                try:
+                    from app.services.river_amf import get_model as _get_arf
+                    from app.services.feature_engineer import build_features as _bfe
+                    _arf = _get_arf()
+                    _feat_vec = build_features(sym, closes, highs, lows, volumes,
+                                               sentiment_cache.get(sym, 0.0))
+                    arf_pred = _arf.predict_one(_feat_vec)
+                    if arf_pred is not None:
+                        agrees = (arf_pred == 1 and final_dir == "BUY") or \
+                                 (arf_pred == 0 and final_dir == "SELL")
+                        final_conf = max(0.0, min(1.0, final_conf + (0.05 if agrees else -0.05)))
+                        features["arf_prediction"] = int(arf_pred)
+                    _arf.learn_one(_feat_vec, 1 if tech_dir == "BUY" else 0)
+                except Exception:  # noqa: BLE001
+                    pass
+
+                # ── Phase 7: Drift detector confidence penalty ────────────────
+                try:
+                    from app.services.drift_detector import get_drift_detector
+                    drift_penalty = get_drift_detector().get_confidence_penalty()
+                    if drift_penalty > 0:
+                        final_conf = max(0.0, final_conf * (1.0 - drift_penalty))
+                        features["drift_penalty"] = round(drift_penalty, 4)
+                except Exception:  # noqa: BLE001
+                    pass
+
+                # ── Phase 8: Regime multiplier ────────────────────────────────
+                try:
+                    from app.services.regime_detector import get_regime_confidence_multiplier
+                    import redis as _redis_reg
+                    from app.core.config import settings as _cfg_reg
+                    _rr = _redis_reg.from_url(_cfg_reg.redis_url, decode_responses=True)
+                    _regime = _rr.get("macro:sentiment:regime") or "neutral"
+                    _rr.close()
+                    regime_mult = get_regime_confidence_multiplier(_regime)
+                    final_conf  = max(0.0, min(1.0, final_conf * regime_mult))
+                    features["regime"]            = _regime
+                    features["regime_multiplier"] = round(regime_mult, 4)
+                except Exception:  # noqa: BLE001
+                    pass
+
                 if final_conf < _CONFIDENCE_MIN:
                     skipped += 1
                     continue
@@ -336,6 +396,27 @@ def generate_intraday_signals():
                         "mv":    model_ver,
                         "feat":  json.dumps(features),
                     },
+                )
+                # ── Immediately log predicted prices into signal_outcomes ──────
+                # Uses a subquery so ON CONFLICT rewrites don't lose the real id.
+                session.execute(
+                    text("""
+                        INSERT INTO signal_outcomes (
+                            signal_id, symbol, signal_type, signal_ts,
+                            entry_price, target_price, stop_loss, confidence,
+                            is_evaluated, created_at, tbl_last_dt
+                        )
+                        SELECT s.id, s.symbol, s.signal_type, s.ts,
+                               s.entry_price, s.target_price, s.stop_loss, s.confidence,
+                               FALSE, NOW(), NOW()
+                        FROM signals s
+                        WHERE s.symbol = :sym AND s.ts = :ts AND s.signal_type = :st
+                          AND NOT EXISTS (
+                              SELECT 1 FROM signal_outcomes so
+                              WHERE so.signal_id = s.id
+                          )
+                    """),
+                    {"sym": sym, "ts": now_ts, "st": final_dir},
                 )
                 inserted += 1
 

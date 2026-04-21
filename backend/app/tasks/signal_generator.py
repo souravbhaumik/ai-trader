@@ -363,6 +363,77 @@ def generate_signals(self):
                 except Exception:  # noqa: BLE001
                     pass  # Best-effort anomaly check — never block signal generation
 
+                # ── Phase 3b: Fundamentals score ──────────────────────────────
+                # Reads from Redis cache (written daily by fundamentals_ingest)
+                # Adds ±10% weight to final confidence via a simple bump.
+                try:
+                    from app.services.fundamentals_service import (
+                        get_fundamentals_from_cache, score_fundamentals,
+                    )
+                    import redis as _redis_fund
+                    from app.core.config import settings as _cfg_fund
+                    _rf = _redis_fund.from_url(_cfg_fund.redis_url, decode_responses=True)
+                    fund_data = get_fundamentals_from_cache(sym, redis_client=_rf)
+                    if fund_data:
+                        fund_score = score_fundamentals(fund_data)   # [-1, 1]
+                        # Bump of up to ±5 pp toward final direction
+                        direction_multiplier = 1.0 if final_dir == "BUY" else -1.0
+                        fund_bump = direction_multiplier * fund_score * 0.05
+                        final_conf = max(0.0, min(1.0, final_conf + fund_bump))
+                        features["fundamentals_score"] = round(fund_score, 4)
+                except Exception:  # noqa: BLE001
+                    pass  # Cache miss or yfinance error — skip silently
+
+                # ── Phase 6: River ARF online model ───────────────────────────
+                # ARF is trained online; it returns None until ≥50 samples seen.
+                # When available, its prediction shifts blend score by ±5 pp.
+                try:
+                    from app.services.river_amf import get_model as _get_arf
+                    _arf = _get_arf()
+                    # Ensure feat_vec is available (may be missing if ML unavailable)
+                    if "feat_vec" not in dir():
+                        feat_vec = build_features(sym, closes, highs, lows, volumes,
+                                                  sentiment_cache.get(sym, 0.0))
+                    arf_pred = _arf.predict_one(feat_vec)      # 1=BUY, 0=SELL, None=not_ready
+                    if arf_pred is not None:
+                        # ARF agrees → +0.05 confidence; disagrees → −0.05
+                        agrees = (arf_pred == 1 and final_dir == "BUY") or \
+                                 (arf_pred == 0 and final_dir == "SELL")
+                        final_conf = max(0.0, min(1.0, final_conf + (0.05 if agrees else -0.05)))
+                        features["arf_prediction"] = int(arf_pred)
+                    # Always call learn_one so ARF stays up-to-date
+                    _arf.learn_one(feat_vec, 1 if tech_dir == "BUY" else 0)
+                except Exception:  # noqa: BLE001
+                    pass  # River not installed, or model error — best-effort
+
+                # ── Phase 7: Drift detector confidence penalty ────────────────
+                # ADWIN drift detector tracks feature distribution shifts.
+                # High drift → reduce confidence by up to 50%.
+                try:
+                    from app.services.drift_detector import get_drift_detector
+                    drift_penalty = get_drift_detector().get_confidence_penalty()   # [0, 0.5]
+                    if drift_penalty > 0:
+                        final_conf = max(0.0, final_conf * (1.0 - drift_penalty))
+                        features["drift_penalty"] = round(drift_penalty, 4)
+                except Exception:  # noqa: BLE001
+                    pass  # Drift detector unavailable — skip
+
+                # ── Phase 8: Regime multiplier ────────────────────────────────
+                # risk_on→×1.1, risk_off→×0.6, neutral→×1.0
+                try:
+                    from app.services.regime_detector import get_regime_confidence_multiplier
+                    import redis as _redis_reg
+                    from app.core.config import settings as _cfg_reg
+                    _rr = _redis_reg.from_url(_cfg_reg.redis_url, decode_responses=True)
+                    _regime = _rr.get("macro:sentiment:regime") or "neutral"
+                    _rr.close()
+                    regime_mult = get_regime_confidence_multiplier(_regime)
+                    final_conf  = max(0.0, min(1.0, final_conf * regime_mult))
+                    features["regime"]           = _regime
+                    features["regime_multiplier"] = round(regime_mult, 4)
+                except Exception:  # noqa: BLE001
+                    pass  # Redis unavailable or regime not yet computed — skip
+
                 if final_conf < _CONFIDENCE_MIN:
                     skipped += 1
                     continue
@@ -399,6 +470,36 @@ def generate_signals(self):
                         "model_version": model_ver,
                         "features":      json.dumps(features),
                         "created_at":    now_ts,
+                    },
+                )
+
+                # ── Immediately log predicted prices into signal_outcomes ──────
+                # Actual prices (price_1d/3d/5d) are filled in automatically by
+                # the evaluation task (5 PM EOD + 8:20 AM morning fill next day).
+                # Using WHERE NOT EXISTS so reruns are idempotent.
+                session.execute(
+                    text("""
+                        INSERT INTO signal_outcomes (
+                            signal_id, symbol, signal_type, signal_ts,
+                            entry_price, target_price, stop_loss, confidence,
+                            is_evaluated, created_at, tbl_last_dt
+                        )
+                        SELECT :id, :symbol, :signal_type, :ts,
+                               :entry, :target, :sl, :conf,
+                               FALSE, NOW(), NOW()
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM signal_outcomes WHERE signal_id = :id
+                        )
+                    """),
+                    {
+                        "id":          str(sig_id),
+                        "symbol":      sym,
+                        "signal_type": final_dir,
+                        "ts":          now_ts,
+                        "entry":       entry,
+                        "target":      target,
+                        "sl":          stop_loss,
+                        "conf":        round(final_conf, 4),
                     },
                 )
                 inserted += 1

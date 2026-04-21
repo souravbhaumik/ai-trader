@@ -175,6 +175,8 @@ def train_lgbm(
         random_state     = 42,
         n_jobs           = -1,
         verbosity        = -1,
+        # GPU acceleration: set LGBM_DEVICE=gpu in docker-compose env to use RTX 3050
+        device_type      = os.getenv("LGBM_DEVICE", "cpu"),
     )
     clf = lgb.LGBMClassifier(**hp)
     clf.fit(

@@ -99,6 +99,15 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: 6379
       MLFLOW_TRACKING_URI: http://mlflow:5000
+      SENTIMENT_DEVICE: cuda     # RTX 3050 — FinBERT FP16 inference
+      LGBM_DEVICE: gpu           # LightGBM GPU acceleration
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     depends_on:
       postgres:
         condition: service_healthy

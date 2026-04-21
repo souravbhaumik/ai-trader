@@ -62,6 +62,9 @@ class SignalOutcomeSummary:
     target_price: Optional[float]
     stop_loss: Optional[float]
     confidence: float
+    price_1d: Optional[float]   # actual close on day+1
+    price_3d: Optional[float]   # actual close on day+3
+    price_5d: Optional[float]   # actual close on day+5
     return_1d_pct: Optional[float]
     return_5d_pct: Optional[float]
     hit_target: bool
@@ -167,6 +170,7 @@ async def get_recent_signal_outcomes(
         SELECT 
             signal_id, symbol, signal_type, signal_ts,
             entry_price, target_price, stop_loss, confidence,
+            price_1d, price_3d, price_5d,
             return_1d_pct, return_5d_pct,
             hit_target, hit_stoploss, is_evaluated
         FROM signal_outcomes
@@ -210,6 +214,9 @@ async def get_recent_signal_outcomes(
             target_price=float(row.target_price) if row.target_price else None,
             stop_loss=float(row.stop_loss) if row.stop_loss else None,
             confidence=float(row.confidence),
+            price_1d=float(row.price_1d) if row.price_1d else None,
+            price_3d=float(row.price_3d) if row.price_3d else None,
+            price_5d=float(row.price_5d) if row.price_5d else None,
             return_1d_pct=float(row.return_1d_pct) if row.return_1d_pct else None,
             return_5d_pct=float(row.return_5d_pct) if row.return_5d_pct else None,
             hit_target=row.hit_target,
