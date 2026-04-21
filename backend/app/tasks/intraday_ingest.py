@@ -44,59 +44,6 @@ def _is_market_open() -> bool:
     return _time(9, 15) <= t <= _time(15, 30)
 
 
-def _fetch_via_angel_one(symbol: str, from_dt: datetime, to_dt: datetime) -> List[dict]:
-    """Fetch 15-min candles from Angel One (sync). Returns list of bar dicts."""
-    try:
-        from app.core.config import settings
-        if not settings.angel_api_key:
-            return []
-
-        import pyotp
-        from SmartApi import SmartConnect  # type: ignore
-
-        smart = SmartConnect(api_key=settings.angel_api_key)
-        totp  = pyotp.TOTP(settings.angel_totp_secret).now()
-        data  = smart.generateSession(settings.angel_client_id, settings.angel_mpin, totp)
-        if not data.get("status"):
-            logger.error("angel_one_system_auth_failed")
-            return []
-
-        # Resolve instrument token
-        from app.services.angel_symbol_master import get_token_sync
-        tok = get_token_sync(symbol)
-        if not tok:
-            return []
-
-        fmt = "%Y-%m-%d %H:%M"
-        params = {
-            "exchange":    tok["exchange"],
-            "symboltoken": tok["token"],
-            "interval":    "FIFTEEN_MINUTE",
-            "fromdate":    from_dt.strftime(fmt),
-            "todate":      to_dt.strftime(fmt),
-        }
-        result = smart.getCandleData(params)
-        smart.terminateSession(settings.angel_client_id)
-
-        if not result or not result.get("status"):
-            return []
-
-        bars = []
-        for row in result.get("data", []):
-            if len(row) < 6:
-                continue
-            bars.append({
-                "symbol": symbol, "ts": str(row[0]),
-                "open": float(row[1]), "high": float(row[2]),
-                "low": float(row[3]), "close": float(row[4]),
-                "volume": int(row[5]), "source": "angel_one",
-            })
-        return bars
-    except Exception as exc:
-        logger.warning("angel_one_intraday_failed", symbol=symbol, err=str(exc))
-        return []
-
-
 def _fetch_via_upstox(symbol: str, from_dt: datetime, to_dt: datetime) -> List[dict]:
     """Fetch 15-min candles from Upstox using the system-level app credentials.
 

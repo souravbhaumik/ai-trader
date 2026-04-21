@@ -62,19 +62,53 @@ def _fetch_all_ohlcv(session) -> dict[str, list[dict]]:
     return out
 
 
+def _fetch_sentiment_history(session) -> dict[tuple, float]:
+    """Return {(symbol, date): avg_sentiment_score} from news_sentiment table.
+
+    The score is the mean FinBERT score for all articles on that calendar day
+    for that symbol.  Used to provide *real* historical sentiment to the
+    LightGBM trainer so the model actually learns from the sentiment feature
+    instead of always seeing 0.0.
+    """
+    from sqlalchemy import text
+
+    rows = session.execute(
+        text("""
+            SELECT symbol,
+                   DATE(published_at AT TIME ZONE 'Asia/Kolkata') AS pub_date,
+                   AVG(score) AS avg_score
+            FROM   news_sentiment
+            WHERE  published_at >= NOW() - INTERVAL :lb
+            GROUP  BY symbol, pub_date
+        """),
+        {"lb": f"{_LOOKBACK_BARS} days"},
+    ).fetchall()
+
+    return {(r[0], r[1]): float(r[2]) for r in rows}
+
+
 def _build_dataset(
     symbol_ohlcv: dict[str, list[dict]],
+    sentiment_map: dict[tuple, float] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
     """Build X, y arrays from OHLCV history of all symbols.
 
     For each symbol and each bar (with sufficient lookback), compute features
     using the *preceding* bars and label using the *next* bar's close.
 
+    Args:
+        symbol_ohlcv: {symbol: [{ts, open, high, low, close, volume}, ...]}
+        sentiment_map: {(symbol, date): avg_score} from news_sentiment table.
+                       When provided, each training row uses the real historical
+                       sentiment score so the model learns from actual sentiment.
+                       Falls back to 0.0 per bar when absent.
+
     Returns (X, y, valid_symbols_used).
     """
     X_rows: list[list[float]] = []
     y_rows: list[int]         = []
     syms_used: list[str]      = []
+    _smap = sentiment_map or {}
 
     for sym, bars in symbol_ohlcv.items():
         closes  = [b["close"]  for b in bars]
@@ -92,7 +126,8 @@ def _build_dataset(
             v_slice = volumes[:i + 1]
 
             feats = build_features(sym, c_slice, h_slice, l_slice, v_slice,
-                                   sentiment_score=0.0)  # no historical sentiment
+                                   sentiment_score=_smap.get((sym, bars[i]["ts"].date()
+                                       if hasattr(bars[i]["ts"], "date") else bars[i]["ts"]), 0.0))
 
             row = [feats.get(n, float("nan")) for n in FEATURE_NAMES]
             if any(math.isnan(v) for v in row):
@@ -142,6 +177,9 @@ def train_lgbm(
     # ── 1. Fetch data ─────────────────────────────────────────────────────────
     with get_sync_session() as session:
         symbol_ohlcv = _fetch_all_ohlcv(session)
+        sentiment_map = _fetch_sentiment_history(session)
+
+    logger.info("lgbm_trainer.sentiment_history_loaded", entries=len(sentiment_map))
 
     if len(symbol_ohlcv) < _MIN_SYMBOLS:
         raise RuntimeError(
@@ -150,7 +188,7 @@ def train_lgbm(
         )
 
     # ── 2. Build feature matrix ───────────────────────────────────────────────
-    X, y, syms_used = _build_dataset(symbol_ohlcv)
+    X, y, syms_used = _build_dataset(symbol_ohlcv, sentiment_map)
     logger.info("lgbm_trainer.dataset_ready",
                 samples=len(X), symbols=len(syms_used),
                 positive_rate=round(y.mean(), 3))

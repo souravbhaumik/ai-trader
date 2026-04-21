@@ -136,13 +136,18 @@ async def _enforce_daily_loss_limit(user_id: uuid.UUID, db: AsyncSession) -> Non
     # Use paper_balance as a fallback denominator if no live portfolio data available.
     portfolio_value  = float(settings_row.paper_balance)
 
-    # Try to get actual live portfolio value from broker
+    # Compute live portfolio value as net BUY cost minus net SELL proceeds of all
+    # COMPLETE orders.  SUM(price * filled_qty) for ALL orders overestimates because
+    # it counts both sides; the net BUY-minus-SELL figure reflects current exposure.
     try:
         holdings_result = await db.execute(
             text("""
-                SELECT COALESCE(SUM(price * filled_qty), 0)
-                FROM   live_orders
-                WHERE  user_id = :uid AND status = 'COMPLETE'
+                SELECT
+                    COALESCE(SUM(CASE WHEN direction = 'BUY'  THEN avg_fill_price * filled_qty ELSE 0 END), 0)
+                  - COALESCE(SUM(CASE WHEN direction = 'SELL' THEN avg_fill_price * filled_qty ELSE 0 END), 0)
+                    AS net_portfolio_value
+                FROM live_orders
+                WHERE user_id = :uid AND status = 'COMPLETE'
             """),
             {"uid": str(user_id)},
         )

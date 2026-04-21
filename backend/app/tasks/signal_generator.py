@@ -62,6 +62,10 @@ _W_SENTIMENT = float(os.getenv("SIGNAL_WEIGHT_SENTIMENT", "0.15"))
 
 import numpy as np
 
+# Indian Standard Time — UTC+5:30 — all timestamps written to DB use IST
+from datetime import timezone, timedelta
+_IST = timezone(timedelta(hours=5, minutes=30))
+
 
 def _rsi(closes: List[float], period: int = 14) -> Optional[float]:
     """RSI of the most-recent bar. Delegates to feature_engineer."""
@@ -242,7 +246,8 @@ def generate_signals(self):
         total    = len(symbols)
         inserted = 0
         skipped  = 0
-        now_ts   = datetime.utcnow()
+        # Use IST-aware timestamp so signals in the DB reflect IST wall time
+        now_ts   = datetime.now(_IST)
 
         logger.info("signal_generator.start", total_symbols=total, ml_mode=ml_available)
         append_task_log(_TASK, f"Loaded {total} active symbols. Starting signal computation…")
@@ -269,14 +274,10 @@ def generate_signals(self):
                 # Oldest → newest
                 rows_asc = list(reversed(rows))
 
-                # ── Lookahead guard ────────────────────────────────────────────
-                # Drop the most-recent bar if the market may still be open
-                # (i.e. a manual or backfill trigger during trading hours).
-                # At 4:45 PM IST (the scheduled run) this is a no-op because
-                # the 3:30 PM close candle is already final, but it protects
-                # against incomplete intraday candles in any other scenario.
+                # Lookahead guard: if running during IST market hours, drop
+                # the current incomplete bar so we don't score a half-candle.
                 import datetime as _dt
-                _now_ist = _dt.datetime.utcnow() + _dt.timedelta(hours=5, minutes=30)
+                _now_ist = _dt.datetime.now(_IST)
                 _market_open = (
                     _now_ist.weekday() < 5           # Mon–Fri
                     and _dt.time(9, 15) <= _now_ist.time() <= _dt.time(15, 30)

@@ -21,6 +21,11 @@ _REGIME_KEY = "macro:sentiment:regime"
 _EVENTS_KEY = "macro:top_events"
 _TTL = 7200  # 2 hours
 
+# Short-lived cache for the raw macro features dict so yfinance is not called
+# on every 30-min tick.  TTL matches _TTL so it auto-expires with the regime.
+_MACRO_FEATURES_KEY = "macro:features"
+_MACRO_FEATURES_TTL = 3600  # 1 hour
+
 
 @celery_app.task(name="app.tasks.macro_pulse.update_macro_regime", bind=True)
 def update_macro_regime(self) -> dict:
@@ -31,9 +36,16 @@ def update_macro_regime(self) -> dict:
 
         r = _redis.from_url(settings.redis_url, decode_responses=True)
 
-        # Fetch macro features (async → sync bridge)
+        # Fetch macro features — use Redis cache to avoid hammering yfinance on
+        # every 30-min tick.  Cache TTL is 1 hour; regime TTL is 2 hours.
         from app.services.macro_features import fetch_macro_features
-        features = asyncio.run(fetch_macro_features())
+        _cached = r.get(_MACRO_FEATURES_KEY)
+        if _cached:
+            features = json.loads(_cached)
+            logger.debug("macro_pulse.features_from_cache")
+        else:
+            features = asyncio.run(fetch_macro_features())
+            r.setex(_MACRO_FEATURES_KEY, _MACRO_FEATURES_TTL, json.dumps(features))
 
         # Detect regime
         from app.services.regime_detector import detect_regime

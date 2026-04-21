@@ -95,7 +95,9 @@ celery_app.conf.beat_schedule = {
         "task":     "app.tasks.ml_training.train_model",
         "schedule": crontab(hour=2, minute=0, day_of_week="6"),  # Saturday 2:00 AM IST
     },
-    # EOD live-order reconciliation — 4:00 PM IST Mon–Fri (before market close)
+    # EOD live-order reconciliation — 4:00 PM IST Mon–Fri
+    # NSE closes at 3:30 PM IST; this fires 30 minutes after close to allow
+    # exchange confirmations to propagate before reconciling order status.
     "eod-live-order-reconciliation": {
         "task":     "app.tasks.eod_reconciliation.reconcile_live_orders",
         "schedule": crontab(hour=16, minute=0, day_of_week="1-5"),
@@ -111,10 +113,16 @@ celery_app.conf.beat_schedule = {
         "schedule": crontab(hour=8, minute=0, day_of_week="1-5"),
     },
     # ── Intraday data + signals ───────────────────────────────────────────────
-    # Intraday OHLCV ingest — every 15 min during market hours
+    # Intraday OHLCV ingest — every 15 min during market hours.
+    # NSE closes at 15:30; using hour="9-14" + explicit 15:00,15:15 avoids
+    # firing no-op ticks at 15:30, 15:45 or 15:59.
     "intraday-ohlcv-ingest": {
         "task":     "app.tasks.intraday_ingest.ingest_intraday",
-        "schedule": crontab(hour="9-15", minute="*/15", day_of_week="1-5"),
+        "schedule": crontab(hour="9-14", minute="*/15", day_of_week="1-5"),
+    },
+    "intraday-ohlcv-ingest-1500": {
+        "task":     "app.tasks.intraday_ingest.ingest_intraday",
+        "schedule": crontab(hour=15, minute="0,15", day_of_week="1-5"),
     },
     # Intraday signals — every 15 min from 9:30 AM to 3:15 PM IST
     # (9:15 AM opening bar is too thin; 3:30 PM close is handled by EOD)

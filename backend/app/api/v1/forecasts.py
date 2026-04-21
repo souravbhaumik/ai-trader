@@ -173,14 +173,19 @@ async def get_forecast(
             f"Insufficient price history for {symbol!r} (have {len(bars)} bars, need ≥82).",
         )
 
-    from app.services.tft_service import forecast  # noqa: PLC0415
+    from app.services.patchtst_service import forecast as patchtst_forecast  # noqa: PLC0415
+    from app.services.tft_service import forecast as tft_forecast             # noqa: PLC0415
 
-    result = forecast(symbol, bars)
+    # PatchTST is the newer/more accurate forecaster; fall back to TFT when
+    # the PatchTST model is not yet loaded (e.g. hasn't been downloaded yet).
+    result = patchtst_forecast(symbol, bars)
+    if result is None:
+        result = tft_forecast(symbol, bars)
     if result is None:
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
-            "TFT forecast model is not loaded. "
-            "Train it on Colab (colab/train_tft_forecaster.ipynb) then run: "
+            "No forecast model is loaded (tried PatchTST then TFT). "
+            "Train a model on Colab and run: "
             "docker compose exec backend python scripts/download_models.py",
         )
 

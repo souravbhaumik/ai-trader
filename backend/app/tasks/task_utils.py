@@ -18,8 +18,11 @@ from __future__ import annotations
 
 import json
 import threading
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Literal, Optional
+
+# Indian Standard Time — UTC+5:30 — used for all task timestamps
+_IST = timezone(timedelta(hours=5, minutes=30))
 
 import structlog
 
@@ -156,14 +159,15 @@ def read_task_logs(task_name: str, limit: int = 200) -> list[Dict[str, Any]]:
 def _push_log(r: Any, task_name: str, msg: str, level: str = "info") -> None:
     """Internal: RPUSH one log entry and trim to cap."""
     key = f"{_LOG_PREFIX}{task_name}"
-    entry = json.dumps({"ts": datetime.now().isoformat(), "level": level, "msg": msg})
+    entry = json.dumps({"ts": datetime.now(_IST).isoformat(), "level": level, "msg": msg})
     r.rpush(key, entry)
     r.ltrim(key, -_LOG_CAP, -1)
     r.expire(key, _LOG_TTL)
 
 
 def now_iso() -> str:
-    return datetime.now().isoformat()
+    """Return the current IST time as an ISO-8601 string."""
+    return datetime.now(_IST).isoformat()
 
 
 def reset_interrupted_tasks() -> None:

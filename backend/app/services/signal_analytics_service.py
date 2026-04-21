@@ -97,7 +97,10 @@ async def get_signal_performance_metrics(
                 COUNT(CASE WHEN signal_type = 'BUY' THEN 1 END) as buy_count,
                 COUNT(CASE WHEN signal_type = 'SELL' THEN 1 END) as sell_count,
                 COUNT(CASE WHEN signal_type = 'BUY' AND hit_target THEN 1 END) as buy_wins,
-                COUNT(CASE WHEN signal_type = 'SELL' AND hit_target THEN 1 END) as sell_wins
+                COUNT(CASE WHEN signal_type = 'SELL' AND hit_target THEN 1 END) as sell_wins,
+                -- Denominator fix: count only evaluated signals per direction for win-rate
+                COUNT(CASE WHEN signal_type = 'BUY' AND is_evaluated THEN 1 END) as buy_evaluated,
+                COUNT(CASE WHEN signal_type = 'SELL' AND is_evaluated THEN 1 END) as sell_evaluated
             FROM signal_outcomes
             WHERE signal_ts >= :cutoff
         """),
@@ -133,10 +136,10 @@ async def get_signal_performance_metrics(
     target_hit_rate = (row.hit_target_count / evaluated * 100) if evaluated > 0 else 0.0
     stoploss_hit_rate = (row.hit_stoploss_count / evaluated * 100) if evaluated > 0 else 0.0
     
-    buy_evaluated = row.buy_count if row.buy_count else 0
-    sell_evaluated = row.sell_count if row.sell_count else 0
-    
-    buy_win_rate = (row.buy_wins / buy_evaluated * 100) if buy_evaluated > 0 else 0.0
+    buy_evaluated  = row.buy_evaluated  or 0
+    sell_evaluated = row.sell_evaluated or 0
+
+    buy_win_rate  = (row.buy_wins  / buy_evaluated  * 100) if buy_evaluated  > 0 else 0.0
     sell_win_rate = (row.sell_wins / sell_evaluated * 100) if sell_evaluated > 0 else 0.0
     
     return SignalPerformanceMetrics(

@@ -15,7 +15,7 @@ The task:
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
@@ -31,6 +31,9 @@ from app.tasks.task_utils import (
 logger = structlog.get_logger(__name__)
 
 _TASK = "signal_outcome_evaluation"
+
+# Indian Standard Time — UTC+5:30
+_IST = timezone(timedelta(hours=5, minutes=30))
 
 
 def _fetch_price_for_symbol(symbol: str, target_date: datetime, session) -> Optional[float]:
@@ -116,14 +119,68 @@ def _get_ohlcv_range(symbol: str, start_date: datetime, end_date: datetime, sess
     }
 
 
+def _send_outcome_notifications(
+    *,
+    symbol: str,
+    signal_type: str,
+    entry_price: float,
+    target_price: Optional[float],
+    stop_loss: Optional[float],
+    hit_target: bool,
+    hit_stoploss: bool,
+) -> None:
+    """Send Discord webhook + Expo push notification when target or SL is hit.
+
+    Called only on the *first* time each flag transitions False → True, so
+    users receive exactly one alert per event.
+    """
+    if hit_target:
+        event   = "🎯 Target Hit"
+        price   = target_price
+        colour  = 0x00C896   # green
+    else:
+        event   = "🛑 Stop-Loss Hit"
+        price   = stop_loss
+        colour  = 0xFF4444   # red
+
+    price_str = f"₹{price:,.2f}" if price else "—"
+    msg = (
+        f"**{event}** | {symbol} | {signal_type}\n"
+        f"Entry: ₹{entry_price:,.2f} → {event}: {price_str}"
+    )
+
+    # Discord (best-effort)
+    try:
+        from app.services.discord_service import notify_signal_sync  # noqa: PLC0415
+        notify_signal_sync(
+            symbol=symbol,
+            signal_type=signal_type,
+            confidence=0.0,          # not applicable for outcome alert
+            entry=entry_price,
+            target=target_price,
+            sl=stop_loss,
+            extra_message=msg,
+        )
+    except Exception as exc:
+        logger.warning("outcome_notification.discord_failed", err=str(exc))
+
+    # Expo push (best-effort — sends to all subscribed tokens)
+    try:
+        from app.services.push_notification_service import send_push_to_all  # noqa: PLC0415
+        send_push_to_all(title=event, body=f"{symbol}: {msg}")
+    except Exception as exc:
+        logger.warning("outcome_notification.push_failed", err=str(exc))
+
+
 @celery_app.task(name="app.tasks.signal_outcome_evaluation.evaluate_signal_outcomes")
 def evaluate_signal_outcomes() -> str:
     """Evaluate past signals and record their outcomes."""
     clear_task_logs(_TASK)
     append_task_log(_TASK, f"[{now_iso()}] Starting signal outcome evaluation...")
     write_task_status(_TASK, "running", "Evaluating signal outcomes...")
-    
-    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # Use IST midnight so day boundaries match NSE trading days (UTC+5:30)
+    today = datetime.now(_IST).replace(hour=0, minute=0, second=0, microsecond=0)
     
     # Evaluate signals from 1, 3, and 5 trading days ago
     evaluation_windows = [1, 3, 5]
@@ -208,13 +265,18 @@ def evaluate_signal_outcomes() -> str:
                 # Determine if fully evaluated (5 days passed)
                 is_evaluated = days_since >= 5
                 
-                # Check if outcome already exists
+                # Check if outcome already exists (also retrieve prior hit flags for notifications)
                 existing = session.execute(
-                    text("SELECT id FROM signal_outcomes WHERE signal_id = :sid"),
+                    text("SELECT id, hit_target, hit_stoploss FROM signal_outcomes WHERE signal_id = :sid"),
                     {"sid": str(signal.id)},
                 ).first()
                 
                 if existing:
+                    # Check which outcomes are newly hitting target or SL
+                    # so we can send notifications only on the first occurrence
+                    prev_hit_target   = bool(existing[1]) if len(existing) > 1 else False
+                    prev_hit_stoploss = bool(existing[2]) if len(existing) > 2 else False
+
                     # Update existing outcome
                     session.execute(
                         text("""
@@ -249,6 +311,20 @@ def evaluate_signal_outcomes() -> str:
                         },
                     )
                     outcomes_updated += 1
+
+                    # ── Notifications: fire only on first occurrence of hit ────────────
+                    newly_hit_target   = target_sl_result["hit_target"]   and not prev_hit_target
+                    newly_hit_stoploss = target_sl_result["hit_stoploss"] and not prev_hit_stoploss
+                    if newly_hit_target or newly_hit_stoploss:
+                        _send_outcome_notifications(
+                            symbol=signal.symbol,
+                            signal_type=signal.signal_type,
+                            entry_price=entry_price,
+                            target_price=float(signal.target_price) if signal.target_price else None,
+                            stop_loss=float(signal.stop_loss) if signal.stop_loss else None,
+                            hit_target=newly_hit_target,
+                            hit_stoploss=newly_hit_stoploss,
+                        )
                 else:
                     # Insert new outcome
                     session.execute(
