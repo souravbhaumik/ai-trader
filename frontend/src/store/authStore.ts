@@ -14,10 +14,15 @@ interface AuthState {
   user: AuthUser | null
   accessToken: string | null
   tradingMode: 'paper' | 'live'
+  preferredBroker: string
+
+  brokerUpdatedAt: number
 
   setAuth: (user: AuthUser, accessToken: string) => void
   setAccessToken: (token: string) => void
   setTradingMode: (mode: 'paper' | 'live') => void
+  setPreferredBroker: (broker: string) => void
+  markBrokerUpdated: () => void
   clearAuth: () => void
   isAuthenticated: () => boolean
   isAdmin: () => boolean
@@ -35,13 +40,16 @@ function loadUser(): AuthUser | null {
   }
 }
 
-function loadTradingMode(): 'paper' | 'live' {
+function loadSettings(): { tradingMode: 'paper' | 'live'; preferredBroker: string } {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY)
-    const parsed = raw ? (JSON.parse(raw) as { tradingMode?: string }) : {}
-    return parsed.tradingMode === 'live' ? 'live' : 'paper'
+    const parsed = raw ? (JSON.parse(raw) as { tradingMode?: string; preferredBroker?: string }) : {}
+    return {
+      tradingMode: parsed.tradingMode === 'live' ? 'live' : 'paper',
+      preferredBroker: parsed.preferredBroker ?? 'angel_one',
+    }
   } catch {
-    return 'paper'
+    return { tradingMode: 'paper', preferredBroker: 'angel_one' }
   }
 }
 
@@ -51,7 +59,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   // On page reload, App.tsx calls /auth/refresh using the httpOnly cookie
   // to silently restore a fresh JWT without requiring re-login.
   accessToken: null,
-  tradingMode: loadTradingMode(),
+  tradingMode: loadSettings().tradingMode,
+  preferredBroker: loadSettings().preferredBroker,
+  brokerUpdatedAt: 0,
 
   setAuth: (user, accessToken) => {
     localStorage.setItem(USER_KEY, JSON.stringify(user))
@@ -62,10 +72,23 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   setTradingMode: (tradingMode) => {
     try {
-      localStorage.setItem(SETTINGS_KEY, JSON.stringify({ tradingMode }))
+      const raw = localStorage.getItem(SETTINGS_KEY)
+      const parsed = raw ? JSON.parse(raw) : {}
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify({ ...parsed, tradingMode }))
     } catch { /* ignore storage errors */ }
     set({ tradingMode })
   },
+
+  setPreferredBroker: (preferredBroker) => {
+    try {
+      const raw = localStorage.getItem(SETTINGS_KEY)
+      const parsed = raw ? JSON.parse(raw) : {}
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify({ ...parsed, preferredBroker }))
+    } catch { /* ignore storage errors */ }
+    set({ preferredBroker })
+  },
+
+  markBrokerUpdated: () => set({ brokerUpdatedAt: Date.now() }),
 
   clearAuth: () => {
     localStorage.removeItem(USER_KEY)

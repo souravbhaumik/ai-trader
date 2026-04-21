@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { User, Shield, Bell, Sliders, Link, Trash2 } from 'lucide-react'
+import { User, Shield, Bell, Sliders, Link, Trash2, ExternalLink } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { useAuthStore } from '../store/authStore'
 import { apiClient } from '../api/client'
@@ -15,14 +15,16 @@ function Toggle({ checked, onChange }: { checked: boolean, onChange: (v: boolean
 }
 
 interface BrokerCreds { client_id: string; api_key: string; api_secret: string; totp_secret: string }
+interface UpstoxCreds { api_key: string; api_secret: string }
 
 export default function SettingsPage() {
   const user = useAuthStore(s => s.user)
-  const setTradingMode = useAuthStore(s => s.setTradingMode)
-  const clearAuth = useAuthStore(s => s.clearAuth)
-  const navigate = useNavigate()
+  const setPreferredBroker = useAuthStore(s => s.setPreferredBroker)
+  const markBrokerUpdated  = useAuthStore(s => s.markBrokerUpdated)
+  const setTradingMode    = useAuthStore(s => s.setTradingMode)
+  const clearAuth         = useAuthStore(s => s.clearAuth)
 
-  // Settings state — loaded from API
+  const navigate           = useNavigate()
   const [loaded, setLoaded]           = useState(false)
   const [saving, setSaving]           = useState(false)
   const [mode, setMode]               = useState<'paper'|'live'>('paper')
@@ -31,12 +33,20 @@ export default function SettingsPage() {
   const [notifSig, setNotifSig]       = useState(true)
   const [notifOrders, setNotifOrders] = useState(true)
   const [notifNews, setNotifNews]     = useState(true)
-  const [broker, setBroker]           = useState('angel_one')
 
-  // Broker credential form
-  const [brokerForm, setBrokerForm]   = useState<BrokerCreds>({ client_id:'', api_key:'', api_secret:'', totp_secret:'' })
-  const [poolEligible, setPoolEligible] = useState(false)
-  const [savingCreds, setSavingCreds] = useState(false)
+  // Broker credential forms — both shown simultaneously
+  const [angelForm, setAngelForm]     = useState<BrokerCreds>({ client_id:'', api_key:'', api_secret:'', totp_secret:'' })
+  const [upstoxForm, setUpstoxForm]   = useState<UpstoxCreds>({ api_key:'', api_secret:'' })
+  const [angelPoolEligible, setAngelPoolEligible]   = useState(false)
+  const [upstoxPoolEligible, setUpstoxPoolEligible] = useState(false)
+  const [savingAngel, setSavingAngel]               = useState(false)
+  const [savingUpstox, setSavingUpstox]             = useState(false)
+  const [angelConnected, setAngelConnected]         = useState(false)
+  const [upstoxConnected, setUpstoxConnected]       = useState(false)
+  const [connectingUpstox, setConnectingUpstox]     = useState(false)
+  const [upstoxRedirectUri, setUpstoxRedirectUri]   = useState('http://localhost:8000/api/v1/broker-credentials/upstox/callback')
+
+  // Settings state — loaded from API
 
   // OTP gate state for live trading enablement
   const [showOtpModal, setShowOtpModal] = useState(false)
@@ -58,16 +68,21 @@ export default function SettingsPage() {
       setNotifSig(d.notification_signals)
       setNotifOrders(d.notification_orders)
       setNotifNews(d.notification_news ?? true)
-      setBroker(d.preferred_broker ?? 'angel_one')
       setLoaded(true)
     }).catch(() => setLoaded(true))
   }, [])
 
   useEffect(() => {
-    apiClient.get(`/broker-credentials/${broker}`)
-      .then(r => setPoolEligible(Boolean(r.data?.pool_eligible)))
-      .catch(() => setPoolEligible(false))
-  }, [broker])
+    apiClient.get('/broker-credentials/angel_one')
+      .then(r => { setAngelPoolEligible(Boolean(r.data?.pool_eligible)); setAngelConnected(Boolean(r.data?.is_configured)) })
+      .catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    apiClient.get('/broker-credentials/upstox')
+      .then(r => { setUpstoxPoolEligible(Boolean(r.data?.pool_eligible)); setUpstoxConnected(Boolean(r.data?.is_configured)) })
+      .catch(() => {})
+  }, [])
 
   async function saveSettings() {
     setSaving(true)
@@ -79,7 +94,6 @@ export default function SettingsPage() {
         notification_signals: notifSig,
         notification_orders: notifOrders,
         notification_news: notifNews,
-        preferred_broker: broker,
       })
       setTradingMode(mode)
       toast.success('Settings saved.')
@@ -143,28 +157,60 @@ export default function SettingsPage() {
     }
   }
 
-  async function handleBrokerChange(newBroker: string) {
-    setBroker(newBroker)
+  async function saveAngelCreds() {
+    setSavingAngel(true)
     try {
-      await apiClient.patch('/settings', { preferred_broker: newBroker })
+      await apiClient.put('/broker-credentials/angel_one', {
+        ...angelForm,
+        pool_eligible: angelPoolEligible,
+      })
+      setAngelConnected(true)
+      setPreferredBroker('angel_one')
+      await apiClient.patch('/settings', { preferred_broker: 'angel_one' })
+      markBrokerUpdated()
+      toast.success('Angel One credentials saved. Live prices are now active.')
+      setAngelForm({ client_id:'', api_key:'', api_secret:'', totp_secret:'' })
     } catch {
-      toast.error('Failed to save data source.')
+      toast.error('Failed to save Angel One credentials.')
+    } finally {
+      setSavingAngel(false)
     }
   }
 
-  async function saveBrokerCreds() {
-    setSavingCreds(true)
+  async function saveUpstoxCreds() {
+    setSavingUpstox(true)
     try {
-      await apiClient.put(`/broker-credentials/${broker}`, {
-        ...brokerForm,
-        pool_eligible: poolEligible,
+      await apiClient.put('/broker-credentials/upstox', {
+        ...upstoxForm,
+        pool_eligible: upstoxPoolEligible,
       })
-      toast.success('Credentials saved.')
-      setBrokerForm({ client_id:'', api_key:'', api_secret:'', totp_secret:'' })
+      toast.success('Upstox credentials saved. Opening Upstox login…')
+      setUpstoxForm({ api_key:'', api_secret:'' })
+      // Automatically trigger OAuth — open Upstox login in new tab
+      await triggerUpstoxOAuth()
+      markBrokerUpdated()
     } catch {
-      toast.error('Failed to save credentials.')
+      toast.error('Failed to save Upstox credentials.')
     } finally {
-      setSavingCreds(false)
+      setSavingUpstox(false)
+    }
+  }
+
+  async function triggerUpstoxOAuth() {
+    setConnectingUpstox(true)
+    try {
+      const r = await apiClient.get('/broker-credentials/upstox/authorize')
+      const url: string = r.data?.authorization_url
+      if (r.data?.redirect_uri) setUpstoxRedirectUri(r.data.redirect_uri)
+      if (url) {
+        window.open(url, '_blank', 'noopener,noreferrer')
+        toast.success('Upstox login opened in a new tab. After authorising, come back — live prices will activate.')
+      }
+    } catch (e: unknown) {
+      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      toast.error(msg ?? 'Could not get Upstox authorization URL. Save your App Key & Secret first.')
+    } finally {
+      setConnectingUpstox(false)
     }
   }
 
@@ -193,10 +239,11 @@ export default function SettingsPage() {
         </div>
       </div>
 
-      {/* ── 2-column layout: Account (left) | Settings (right) ───────────────── */}
+      {/* ── 2-column layout: Account + Notifications (left) | Trading + Risk + Broker (right) ── */}
       <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:24, alignItems:'start' }}>
 
-        {/* ── LEFT: Account ─────────────────────────────────────────────────── */}
+        {/* ── LEFT: Account + Notifications ─────────────────────────────────── */}
+        <div style={{ display:'flex', flexDirection:'column', gap:24 }}>
         <div className="settings-section">
           <div className="settings-title" style={{ display:'flex', alignItems:'center', gap:8 }}>
             <User size={15} /> Account
@@ -243,7 +290,7 @@ export default function SettingsPage() {
           }}>
             <div>
               <div style={{ fontWeight:600, fontSize:13, color:'var(--red)' }}>Delete Account</div>
-              <div style={{ fontSize:11, color:'var(--text-muted)', marginTop:2 }}>
+              <div style={{ fontSize:11, color:'var(--text-secondary)', marginTop:2 }}>
                 Permanently removes your account and all associated data. This cannot be undone.
               </div>
             </div>
@@ -258,9 +305,39 @@ export default function SettingsPage() {
               <Trash2 size={13}/> Delete
             </button>
           </div>
-        </div>
+        </div>{/* end Account card */}
 
-        {/* ── RIGHT: Trading Mode + Risk + Notifications + Broker ──────────── */}
+          {/* Notifications */}
+          <div className="settings-section">
+            <div className="settings-title" style={{ display:'flex', alignItems:'center', gap:8 }}>
+              <Bell size={15} /> Notifications
+            </div>
+            <div className="settings-row">
+              <div>
+                <div className="settings-row-label">Signal Alerts</div>
+                <div className="settings-row-sub">Notify when a new BUY/SELL signal is generated</div>
+              </div>
+              <Toggle checked={notifSig} onChange={setNotifSig} />
+            </div>
+            <div className="settings-row">
+              <div>
+                <div className="settings-row-label">Order Updates</div>
+                <div className="settings-row-sub">Notify on order fill, partial, or reject</div>
+              </div>
+              <Toggle checked={notifOrders} onChange={setNotifOrders} />
+            </div>
+            <div className="settings-row">
+              <div>
+                <div className="settings-row-label">News &amp; Market Events</div>
+                <div className="settings-row-sub">Breaking news that may affect your positions</div>
+              </div>
+              <Toggle checked={notifNews} onChange={setNotifNews} />
+            </div>
+          </div>
+
+        </div>{/* end left column */}
+
+        {/* ── RIGHT: Trading Mode + Risk + Broker ───────────────────────────── */}
         <div style={{ display:'flex', flexDirection:'column', gap:24 }}>
 
           {/* Trading Mode */}
@@ -330,90 +407,106 @@ export default function SettingsPage() {
             </div>
           </div>
 
-          {/* Notifications */}
+          {/* Broker Credentials */}
           <div className="settings-section">
             <div className="settings-title" style={{ display:'flex', alignItems:'center', gap:8 }}>
-              <Bell size={15} /> Notifications
+              <Link size={15} /> Broker Credentials
             </div>
-            <div className="settings-row">
-              <div>
-                <div className="settings-row-label">Signal Alerts</div>
-                <div className="settings-row-sub">Notify when a new BUY/SELL signal is generated</div>
-              </div>
-              <Toggle checked={notifSig} onChange={setNotifSig} />
-            </div>
-            <div className="settings-row">
-              <div>
-                <div className="settings-row-label">Order Updates</div>
-                <div className="settings-row-sub">Notify on order fill, partial, or reject</div>
-              </div>
-              <Toggle checked={notifOrders} onChange={setNotifOrders} />
-            </div>
-            <div className="settings-row">
-              <div>
-                <div className="settings-row-label">News &amp; Market Events</div>
-                <div className="settings-row-sub">Breaking news that may affect your positions</div>
-              </div>
-              <Toggle checked={notifNews} onChange={setNotifNews} />
-            </div>
-          </div>
-
-          {/* Broker */}
-          <div className="settings-section">
-            <div className="settings-title" style={{ display:'flex', alignItems:'center', gap:8 }}>
-              <Link size={15} /> Data Source &amp; Broker
-            </div>
-            <div className="settings-row">
-              <div>
-                <div className="settings-row-label">Data Source</div>
-                <div className="settings-row-sub">Angel One / Upstox = real-time. No credentials configured = prices show as 0.00.</div>
-              </div>
-              <select value={broker} onChange={e => handleBrokerChange(e.target.value)}
-                style={{ background:'var(--bg-card)', color:'var(--text-primary)', border:'1px solid var(--border)', borderRadius:8, padding:'6px 12px', fontSize:13 }}>
-                <option value="angel_one">Angel One</option>
-                <option value="upstox">Upstox</option>
-              </select>
+            <div style={{ fontSize:12, color:'var(--text-muted)', marginBottom:16 }}>
+              Credentials are stored encrypted. Select the active broker from the header.
             </div>
 
-            {(
-              <div style={{ marginTop:16, display:'flex', flexDirection:'column', gap:10 }}>
-                <div className="text-sm text-muted">Enter your {broker === 'angel_one' ? 'Angel One' : 'Upstox'} API credentials. They are stored encrypted on the server.</div>
-                {(['client_id','api_key','api_secret', ...(broker === 'angel_one' ? ['totp_secret'] : [])] as (keyof BrokerCreds)[]).map(field => {
-                  const label = broker === 'angel_one' && field === 'api_secret'
-                    ? 'MPIN (4-digit login PIN)'
-                    : broker === 'angel_one' && field === 'totp_secret'
-                    ? 'TOTP Secret (from authenticator app)'
+            {/* Angel One */}
+            <div style={{ marginBottom:20 }}>
+              <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:12 }}>
+                <span style={{ background:'rgba(59,130,246,0.15)', color:'#3b82f6', borderRadius:6, padding:'2px 10px', fontSize:12, fontWeight:600 }}>Angel One</span>
+                <span style={{ fontSize:11, display:'flex', alignItems:'center', gap:4 }}>
+                  <span style={{ width:7, height:7, borderRadius:'50%', background: angelConnected ? 'var(--green)' : 'var(--text-muted)', display:'inline-block' }} />
+                  {angelConnected ? 'Connected — live prices active' : 'Not connected'}
+                </span>
+              </div>
+              <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
+                {(['client_id','api_key','api_secret','totp_secret'] as (keyof BrokerCreds)[]).map(field => {
+                  const label = field === 'api_secret' ? 'MPIN (4-digit login PIN)'
+                    : field === 'totp_secret' ? 'TOTP Secret (from authenticator app)'
                     : field.replace(/_/g,' ').toUpperCase()
-                  const ph = broker === 'angel_one' && field === 'api_secret'
-                    ? 'Your 4-digit Angel One MPIN'
-                    : 'Paste value here…'
+                  const ph = field === 'api_secret' ? 'Your 4-digit Angel One MPIN' : 'Paste value here…'
                   return (
                     <div key={field} className="form-group" style={{ margin:0 }}>
-                      <label style={{ fontSize:12, color:'var(--text-muted)', marginBottom:4, display:'block' }}>
-                        {label}
-                      </label>
-                      <input type="password" autoComplete="off"
-                        placeholder={ph}
-                        value={brokerForm[field]}
-                        onChange={e => setBrokerForm(f => ({ ...f, [field]: e.target.value }))}
+                      <label style={{ fontSize:12, color:'var(--text-muted)', marginBottom:4, display:'block' }}>{label}</label>
+                      <input type="password" autoComplete="off" placeholder={ph}
+                        value={angelForm[field]}
+                        onChange={e => setAngelForm(f => ({ ...f, [field]: e.target.value }))}
                       />
                     </div>
                   )
                 })}
-                <div className="settings-row" style={{ marginTop: 6 }}>
+                <div className="settings-row" style={{ marginTop:4 }}>
                   <div>
                     <div className="settings-row-label">Contribute to shared data pool</div>
-                    <div className="settings-row-sub">Allow your broker session to help fetch shared market quotes.</div>
+                    <div className="settings-row-sub">Allow your session to help fetch shared market quotes.</div>
                   </div>
-                  <Toggle checked={poolEligible} onChange={setPoolEligible} />
+                  <Toggle checked={angelPoolEligible} onChange={setAngelPoolEligible} />
                 </div>
-                <div style={{ display:'flex', justifyContent:'flex-end', marginTop:4 }}>
-                  <button className="btn btn-green" style={{ fontSize:13 }} onClick={saveBrokerCreds} disabled={savingCreds}>
-                    {savingCreds ? 'Saving…' : 'Save Credentials'}
+                <div style={{ display:'flex', justifyContent:'flex-end', gap:8 }}>
+                  <button className="btn btn-green" style={{ fontSize:13 }} onClick={saveAngelCreds} disabled={savingAngel}>
+                    {savingAngel ? 'Saving…' : angelConnected ? 'Update Credentials' : 'Save & Connect'}
                   </button>
                 </div>
               </div>
-            )}
+            </div>
+
+            <div style={{ borderTop:'1px solid var(--border)', margin:'4px 0 20px' }} />
+
+            {/* Upstox */}
+            <div>
+              <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:12 }}>
+                <span style={{ background:'rgba(139,92,246,0.15)', color:'#8b5cf6', borderRadius:6, padding:'2px 10px', fontSize:12, fontWeight:600 }}>Upstox</span>
+                <span style={{ fontSize:11, display:'flex', alignItems:'center', gap:4 }}>
+                  <span style={{ width:7, height:7, borderRadius:'50%', background: upstoxConnected ? 'var(--green)' : 'var(--text-muted)', display:'inline-block' }} />
+                  {upstoxConnected ? 'Authorised — live prices active' : 'Not authorised'}
+                </span>
+              </div>
+              <div style={{ fontSize:12, color:'var(--text-secondary)', marginBottom:10, padding:'10px 12px', background:'var(--bg-hover)', borderRadius:8, lineHeight:1.6 }}>
+                <div style={{ marginBottom:6 }}>Upstox uses OAuth. You must register this exact <strong>Redirect URL</strong> in your <a href="https://developer.upstox.com/apps" target="_blank" rel="noopener noreferrer" style={{ color:'var(--blue)' }}>Upstox developer app</a>:</div>
+                <div style={{ fontFamily:'var(--font-mono)', fontSize:11, background:'var(--bg-card)', border:'1px solid var(--border)', borderRadius:6, padding:'6px 10px', color:'var(--green)', wordBreak:'break-all', userSelect:'all' }}>
+                  {upstoxRedirectUri}
+                </div>
+                <div style={{ marginTop:6, fontSize:11, color:'var(--text-muted)' }}>Copy the URL above → Upstox developer portal → Your App → Edit → Redirect URL → Save.</div>
+              </div>
+              <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
+                {(['api_key','api_secret'] as (keyof UpstoxCreds)[]).map(field => (
+                  <div key={field} className="form-group" style={{ margin:0 }}>
+                    <label style={{ fontSize:12, color:'var(--text-muted)', marginBottom:4, display:'block' }}>
+                      {field === 'api_key' ? 'App Key (API Key)' : 'App Secret (API Secret)'}
+                    </label>
+                    <input type="password" autoComplete="off" placeholder="Paste value here…"
+                      value={upstoxForm[field]}
+                      onChange={e => setUpstoxForm(f => ({ ...f, [field]: e.target.value }))}
+                    />
+                  </div>
+                ))}
+                <div className="settings-row" style={{ marginTop:4 }}>
+                  <div>
+                    <div className="settings-row-label">Contribute to shared data pool</div>
+                    <div className="settings-row-sub">Allow your session to help fetch shared market quotes.</div>
+                  </div>
+                  <Toggle checked={upstoxPoolEligible} onChange={setUpstoxPoolEligible} />
+                </div>
+                <div style={{ display:'flex', justifyContent:'flex-end', gap:8 }}>
+                  {upstoxConnected && (
+                    <button className="btn btn-outline" style={{ fontSize:13, display:'flex', alignItems:'center', gap:6 }}
+                      onClick={triggerUpstoxOAuth} disabled={connectingUpstox}>
+                      <ExternalLink size={13}/>
+                      {connectingUpstox ? 'Opening…' : 'Reconnect Upstox'}
+                    </button>
+                  )}
+                  <button className="btn btn-green" style={{ fontSize:13 }} onClick={saveUpstoxCreds} disabled={savingUpstox}>
+                    {savingUpstox ? 'Saving & opening login…' : upstoxConnected ? 'Update & Reconnect' : 'Save & Connect Upstox →'}
+                  </button>
+                </div>
+              </div>
+            </div>
           </div>
 
         </div>{/* end right column */}

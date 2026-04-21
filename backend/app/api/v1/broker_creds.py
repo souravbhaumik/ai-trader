@@ -1,6 +1,8 @@
-﻿"""Broker Credentials API � save and retrieve encrypted broker API credentials."""
+﻿"""Broker Credentials API — save and retrieve encrypted broker API credentials."""
 from __future__ import annotations
 
+import hashlib
+import hmac
 import uuid
 from datetime import datetime, timezone
 from typing import Annotated, Optional
@@ -119,8 +121,14 @@ async def save_broker_credentials(
     if body.pool_eligible is not None:
         creds.pool_eligible = bool(body.pool_eligible)
 
-    # Mark configured if at least api_key + client_id are present
-    creds.is_configured = bool(creds.api_key and creds.client_id)
+    # Mark configured: Angel One needs api_key + client_id; Upstox just needs api_key
+    # (Upstox is_configured=True is set in the OAuth callback once access_token is obtained)
+    if broker_name == "angel_one":
+        creds.is_configured = bool(creds.api_key and creds.client_id)
+    else:
+        # For Upstox, credentials saved = ready for OAuth; already-authorised rows keep is_configured=True
+        if not creds.is_configured:
+            creds.is_configured = False  # stays False until OAuth callback sets it True
     creds.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
     session.add(creds)
@@ -213,14 +221,36 @@ async def upstox_authorize_url(
 
     api_key = decrypt_field(creds.api_key)
     redirect_uri = app_settings.upstox_redirect_uri or "http://localhost:8000/api/v1/broker-credentials/upstox/callback"
+
+    # Sign the user_id into the OAuth state param so the callback knows which user to update
+    raw_state = str(user.id)
+    state_sig = hmac.new(
+        app_settings.jwt_secret_key.encode(),
+        raw_state.encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    state = f"{raw_state}.{state_sig}"
+
     adapter = UpstoxAdapter(api_key=api_key, redirect_uri=redirect_uri)
-    auth_url = adapter.get_authorization_url()
-    return {"authorization_url": auth_url}
+    auth_url = adapter.get_authorization_url(state=state)
+    return {"authorization_url": auth_url, "redirect_uri": redirect_uri}
+
+
+def _verify_oauth_state(state: Optional[str], secret: str) -> Optional[str]:
+    """Verify HMAC-signed state param. Returns user_id string or None if invalid."""
+    if not state or "." not in state:
+        return None
+    raw_user_id, _, sig = state.partition(".")
+    expected = hmac.new(secret.encode(), raw_user_id.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, sig):
+        return None
+    return raw_user_id
 
 
 @router.get("/upstox/callback")
 async def upstox_oauth_callback(
     code: str,
+    state: Optional[str] = None,
     session: AsyncSession = Depends(get_session),
 ):
     """Upstox OAuth2 callback — exchanges the authorization code for tokens.
@@ -239,14 +269,34 @@ async def upstox_oauth_callback(
     from app.brokers.upstox import UpstoxAdapter
     from datetime import datetime, timezone, timedelta
 
-    # Find the most recent unconfigured Upstox credentials row
-    # (we match by api_key presence — the code belongs to our registered app)
-    result = await session.execute(
-        select(BrokerCredential).where(
-            BrokerCredential.broker_name == "upstox",
-            BrokerCredential.api_key.isnot(None),
-        ).order_by(BrokerCredential.updated_at.desc())
-    )
+    from app.core.config import settings as _cfg
+
+    # Resolve user_id from the signed state param (preferred)
+    target_user_id: Optional[uuid.UUID] = None
+    verified_user_id = _verify_oauth_state(state, _cfg.jwt_secret_key)
+    if verified_user_id:
+        try:
+            target_user_id = uuid.UUID(verified_user_id)
+        except ValueError:
+            pass
+
+    if target_user_id:
+        result = await session.execute(
+            select(BrokerCredential).where(
+                BrokerCredential.broker_name == "upstox",
+                BrokerCredential.user_id == target_user_id,
+                BrokerCredential.api_key.isnot(None),
+            )
+        )
+    else:
+        # Fallback: most recently updated row (legacy, single-user)
+        logger.warning("upstox_callback_no_state_param")
+        result = await session.execute(
+            select(BrokerCredential).where(
+                BrokerCredential.broker_name == "upstox",
+                BrokerCredential.api_key.isnot(None),
+            ).order_by(BrokerCredential.updated_at.desc())
+        )
     creds = result.scalar_one_or_none()
     if not creds:
         raise HTTPException(
@@ -281,6 +331,16 @@ async def upstox_oauth_callback(
     creds.updated_at    = datetime.now(timezone.utc).replace(tzinfo=None)
 
     session.add(creds)
+
+    # Auto-set preferred_broker = upstox if not already set
+    from app.models.user_settings import UserSettings
+    from sqlmodel import select as _sel
+    us_result = await session.execute(_sel(UserSettings).where(UserSettings.user_id == creds.user_id))
+    user_settings = us_result.scalar_one_or_none()
+    if user_settings and not user_settings.preferred_broker:
+        user_settings.preferred_broker = "upstox"
+        session.add(user_settings)
+
     await session.commit()
 
     logger.info("upstox_oauth_complete", user_id=str(creds.user_id))

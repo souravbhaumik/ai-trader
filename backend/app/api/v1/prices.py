@@ -28,23 +28,21 @@ async def get_indices(
     session: AsyncSession = Depends(get_session),
 ):
     """Return live quotes for major Indian indices (Nifty 50, Sensex, etc.)."""
-    adapter = await get_adapter_for_user(
-        str(user.id), user_settings.preferred_broker, session
-    )
+    try:
+        adapter = await get_adapter_for_user(
+            str(user.id), user_settings.preferred_broker, session
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
     quotes = await price_service.get_indices(adapter)
-    broker_configured = adapter.is_credentials_configured()
-
     return {
-        "broker":         adapter.broker_name,
-        "is_configured":  broker_configured,
-        "source":         "live" if broker_configured else "backfill",
-        "indices":        [q.__dict__ for q in quotes],
-        "warning":        None if broker_configured else (
-            f"{user_settings.preferred_broker or 'Broker'} credentials not configured. "
-            "Showing backfill data — prices may be delayed."
-            if user_settings.preferred_broker
-            else "No broker configured. Showing backfill data."
-        ),
+        "broker":        adapter.broker_name,
+        "is_configured": True,
+        "source":        "live",
+        "indices":       [q.__dict__ for q in quotes],
     }
 
 
@@ -58,18 +56,19 @@ async def get_quote(
     session: AsyncSession = Depends(get_session),
 ):
     """Get latest quote for a single symbol (e.g. RELIANCE, RELIANCE.NS)."""
-    adapter = await get_adapter_for_user(
-        str(user.id), user_settings.preferred_broker, session
-    )
+    try:
+        adapter = await get_adapter_for_user(
+            str(user.id), user_settings.preferred_broker, session
+        )
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
     quote = await price_service.get_quote(adapter, symbol.upper())
     if quote is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"No data found for {symbol}")
     return {
-        "broker":        adapter.broker_name,
-        "is_configured": adapter.is_credentials_configured(),
-        "source":        "live" if adapter.is_credentials_configured() else "backfill",
-        "no_live_data":  adapter.broker_name == "yfinance",
-        "quote":         quote.__dict__,
+        "broker": adapter.broker_name,
+        "source": "live",
+        "quote":  quote.__dict__,
     }
 
 
@@ -85,9 +84,12 @@ async def get_history(
     interval: str = Query("1d", description="1m, 5m, 15m, 1h, 1d"),
 ):
     """Fetch historical OHLCV bars for a symbol (for charting)."""
-    adapter = await get_adapter_for_user(
-        str(user.id), user_settings.preferred_broker, session
-    )
+    try:
+        adapter = await get_adapter_for_user(
+            str(user.id), user_settings.preferred_broker, session
+        )
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
     bars = await price_service.get_history(adapter, symbol.upper(), period, interval)
     return {
         "broker":   adapter.broker_name,

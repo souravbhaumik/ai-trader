@@ -90,13 +90,24 @@ class AngelOneAdapter(BrokerAdapter):
 
             self._smart_api = SmartConnect(api_key=self._api_key)
             totp = pyotp.TOTP(self._totp_secret).now()
-            data = self._smart_api.generateSession(self._client_id, self._password, totp)
+            # generateSession is a blocking HTTP call — run in thread pool with a hard timeout
+            loop = asyncio.get_running_loop()
+            data = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: self._smart_api.generateSession(self._client_id, self._password, totp),
+                ),
+                timeout=15.0,
+            )
             if data.get("status"):
                 self._auth_token = data["data"]["jwtToken"]
                 logger.info("angel_one_connected", client_id=self._client_id)
             else:
                 logger.error("angel_one_auth_failed", response=data)
                 self._smart_api = None
+        except asyncio.TimeoutError:
+            logger.error("angel_one_connect_timeout")
+            self._smart_api = None
         except Exception as e:  # noqa: BLE001
             logger.error("angel_one_connect_error", err=str(e))
             self._smart_api = None
@@ -376,11 +387,15 @@ class AngelOneAdapter(BrokerAdapter):
         try:
             ltp = float(item.get("ltp", 0) or 0)
             prev_close = float(item.get("close", 0) or 0)
-            change = ltp - prev_close
-            change_pct = (change / prev_close * 100) if prev_close else 0.0
+            # After market hours Angel One returns ltp=0 — use close as displayed price
+            price = ltp if ltp > 0 else prev_close
+            if price == 0:
+                return None
+            change = price - prev_close if ltp > 0 else 0.0
+            change_pct = (change / prev_close * 100) if prev_close and ltp > 0 else 0.0
             return Quote(
                 symbol=symbol,
-                price=ltp,
+                price=price,
                 prev_close=prev_close,
                 change=round(change, 2),
                 change_pct=round(change_pct, 2),

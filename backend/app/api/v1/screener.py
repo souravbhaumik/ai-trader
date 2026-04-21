@@ -35,22 +35,21 @@ async def screener(
     sort_dir: str            = Query("desc"),
 ):
     """Return paginated screener results with live prices from the user's chosen broker."""
-    adapter = await get_adapter_for_user(
-        str(user.id), user_settings.preferred_broker, session
-    )
+    from fastapi import HTTPException, status
+    try:
+        adapter = await get_adapter_for_user(
+            str(user.id), user_settings.preferred_broker, session
+        )
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
     result = await screener_service.get_screener_page(
         adapter, session,
         page=page, per_page=per_page,
         q=q, sector=sector, signal_filter=signal,
         sort_by=sort_by, sort_dir=sort_dir,
     )
-    result["broker"]       = adapter.broker_name
-    result["is_configured"] = adapter.is_credentials_configured()
-    if not result["is_configured"]:
-        result["warning"] = (
-            f"{user_settings.preferred_broker or 'Broker'} credentials not configured. "
-            "Prices are unavailable (showing 0.00)."
-        )
+    result["broker"]        = adapter.broker_name
+    result["is_configured"] = True
     return result
 
 

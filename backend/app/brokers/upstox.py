@@ -90,13 +90,15 @@ class UpstoxAdapter(BrokerAdapter):
 
     # ── OAuth2 helpers ────────────────────────────────────────────────────────
 
-    def get_authorization_url(self) -> str:
+    def get_authorization_url(self, state: Optional[str] = None) -> str:
         """Return the Upstox login URL the user must visit once to authorize."""
         params = {
             "response_type": "code",
             "client_id": self._api_key,
             "redirect_uri": self._redirect_uri,
         }
+        if state:
+            params["state"] = state
         return f"{_AUTH_URL}?{urlencode(params)}"
 
     async def exchange_code(self, code: str) -> Dict[str, str]:
@@ -157,7 +159,9 @@ class UpstoxAdapter(BrokerAdapter):
                     headers=self._headers(),
                 )
                 r.raise_for_status()
-                data = r.json().get("data", {}).get(instrument_key, {})
+                # Upstox response keys use ':' but we look up with '|'
+                raw = {k.replace(":", "|"): v for k, v in r.json().get("data", {}).items()}
+                data = raw.get(instrument_key, {})
                 if not data:
                     return None
                 return self._parse_quote(symbol, data)
@@ -177,7 +181,10 @@ class UpstoxAdapter(BrokerAdapter):
                     headers=self._headers(),
                 )
                 r.raise_for_status()
-                raw = r.json().get("data", {})
+                # Upstox responds with colon-separated keys (NSE_EQ:RELIANCE)
+                # but requests use pipe-separated keys (NSE_EQ|RELIANCE)
+                raw_data = r.json().get("data", {})
+                raw = {k.replace(":", "|"): v for k, v in raw_data.items()}
 
                 quotes: List[Quote] = []
                 for sym in symbols:
@@ -246,7 +253,10 @@ class UpstoxAdapter(BrokerAdapter):
                     headers=self._headers(),
                 )
                 r.raise_for_status()
-                raw = r.json().get("data", {})
+                # Upstox responds with colon-separated keys (NSE_INDEX:Nifty 50)
+                # but requests use pipe-separated keys (NSE_INDEX|Nifty 50)
+                raw_data = r.json().get("data", {})
+                raw = {k.replace(":", "|"): v for k, v in raw_data.items()}
 
                 quotes: List[Quote] = []
                 for display_name, key in _INDEX_KEYS.items():
@@ -418,19 +428,23 @@ class UpstoxAdapter(BrokerAdapter):
         try:
             ltp = float(data.get("last_price", 0) or 0)
             ohlc = data.get("ohlc", {})
-            prev_close = float(ohlc.get("close", ltp) or ltp)
-            change = ltp - prev_close
-            change_pct = (change / prev_close * 100) if prev_close else 0.0
+            prev_close = float(ohlc.get("close", 0) or 0)
+            # After market hours Upstox returns last_price=0 — use ohlc.close as price
+            price = ltp if ltp > 0 else prev_close
+            if price == 0:
+                return None  # no data at all, skip
+            change = price - prev_close if ltp > 0 else 0.0
+            change_pct = (change / prev_close * 100) if prev_close and ltp > 0 else 0.0
             return Quote(
                 symbol=symbol,
-                price=round(float(ltp), 4),
+                price=round(float(price), 4),
                 prev_close=round(float(prev_close), 4),
                 change=round(change, 4),
                 change_pct=round(change_pct, 2),
                 volume=int(data.get("volume", 0) or 0),
-                high=float(ohlc.get("high", ltp) or ltp),
-                low=float(ohlc.get("low", ltp) or ltp),
-                open=float(ohlc.get("open", ltp) or ltp),
+                high=float(ohlc.get("high", price) or price),
+                low=float(ohlc.get("low", price) or price),
+                open=float(ohlc.get("open", price) or price),
                 timestamp=datetime.now(timezone.utc).isoformat(),
             )
         except Exception as e:

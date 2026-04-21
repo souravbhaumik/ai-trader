@@ -1,4 +1,5 @@
 ﻿import { useQuery } from '@tanstack/react-query'
+import { useNavigate } from 'react-router-dom'
 import { Wallet, Activity, Target, Clock, TrendingUp, TrendingDown, RefreshCw } from 'lucide-react'
 import { apiClient } from '../api/client'
 import { useAuthStore } from '../store/authStore'
@@ -116,16 +117,19 @@ function LivePriceItem({ row }: { row: ScreenerRow }) {
 // ── Page ───────────────────────────────────────────────────────────────────────
 export default function DashboardPage() {
   const tradingMode = useAuthStore(s => s.tradingMode)
+  const brokerUpdatedAt = useAuthStore(s => s.brokerUpdatedAt)
+  const navigate = useNavigate()
   const [forecastSym, setForecastSym]     = useState<string | null>(null)
   const [orderDefaults, setOrderDefaults] = useState<OrderDefaults | null>(null)
 
   const now = new Date()
   const dateStr = now.toLocaleDateString('en-IN', { weekday:'long', day:'numeric', month:'long', year:'numeric' })
 
-  const { data: indicesData, isLoading: indicesLoading } = useQuery({
-    queryKey: ['indices'],
+  const { data: indicesData, isLoading: indicesLoading, error: indicesError } = useQuery({
+    queryKey: ['indices', brokerUpdatedAt],
     queryFn: () => apiClient.get('/prices/indices').then(r => r.data),
     refetchInterval: 30_000,
+    staleTime: 0,
   })
   const { data: signalsData, isLoading: signalsLoading } = useQuery({
     queryKey: ['signals-recent'],
@@ -143,9 +147,10 @@ export default function DashboardPage() {
     refetchInterval: 30_000,
   })
   const { data: screenerData, isLoading: screenerLoading, refetch: refetchScreener, dataUpdatedAt } = useQuery({
-    queryKey: ['dash-live-prices'],
+    queryKey: ['dash-live-prices', brokerUpdatedAt],
     queryFn: () => apiClient.get('/screener?page=1&per_page=20').then(r => r.data),
     refetchInterval: 15_000,
+    staleTime: 0,
   })
 
   const indices: IndexQuote[] = (indicesData?.indices ?? [])
@@ -291,7 +296,10 @@ export default function DashboardPage() {
             {screenerRows.length === 0 ? (
               <div className="empty-state" style={{ padding:'24px 0' }}>
                 <Activity size={28}/>
-                <p style={{ fontSize:12 }}>Configure broker in Settings for live prices.</p>
+                <p style={{ fontSize:12 }}>No broker configured.</p>
+                <button className="btn btn-outline" style={{ fontSize:12, marginTop:8 }} onClick={() => navigate('/settings')}>
+                  Set up broker →
+                </button>
               </div>
             ) : (
               <div>

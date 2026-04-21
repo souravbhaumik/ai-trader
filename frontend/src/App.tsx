@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { BrowserRouter, Routes, Route, NavLink, Navigate } from 'react-router-dom'
 import { Toaster } from 'react-hot-toast'
+import toast from 'react-hot-toast'
 import { Cpu, LayoutDashboard, Settings, Terminal, BarChart2, Zap, LogOut, Briefcase, TrendingUp, BookOpen } from 'lucide-react'
 import { useAuthStore } from './store/authStore'
 import { apiClient } from './api/client'
@@ -35,15 +36,27 @@ function RequireAdmin({ children }: { children: React.ReactNode }) {
 
 // ── Protected app shell ───────────────────────────────────────────────────────
 function AppLayout() {
-  const { user, clearAuth, tradingMode, setTradingMode, isAdmin } = useAuthStore()
+  const { user, clearAuth, tradingMode, setTradingMode, preferredBroker, setPreferredBroker, isAdmin } = useAuthStore()
 
   // Hydrate tradingMode from API on every page load so topbar stays in sync.
   useEffect(() => {
-    apiClient.get<{ trading_mode: string }>('/settings')
-      .then(r => setTradingMode(r.data.trading_mode as 'paper' | 'live'))
+    apiClient.get<{ trading_mode: string; preferred_broker: string }>('/settings')
+      .then(r => {
+        setTradingMode(r.data.trading_mode as 'paper' | 'live')
+        if (r.data.preferred_broker) setPreferredBroker(r.data.preferred_broker)
+      })
       .catch(() => { /* leave cached value */ })
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  async function handleBrokerChange(b: string) {
+    setPreferredBroker(b)
+    try {
+      await apiClient.patch('/settings', { preferred_broker: b })
+    } catch {
+      toast.error('Failed to save broker preference.')
+    }
+  }
 
   async function handleLogout() {
     try {
@@ -66,6 +79,18 @@ function AppLayout() {
           <span className={`mode-badge ${tradingMode}`}>
             {tradingMode === 'live' ? '⚡ Live Trading' : '📄 Paper Trading'}
           </span>
+          {/* Default broker selector */}
+          <div style={{ display:'flex', alignItems:'center', gap:6, background:'var(--bg-card)', border:'1px solid var(--border)', borderRadius:8, padding:'3px 10px' }}>
+            <span style={{ fontSize:11, color:'var(--text-muted)', whiteSpace:'nowrap' }}>Default Broker</span>
+            <select
+              value={preferredBroker}
+              onChange={e => handleBrokerChange(e.target.value)}
+              style={{ background:'transparent', color:'var(--text-primary)', border:'none', fontSize:12, fontWeight:600, outline:'none', cursor:'pointer', paddingLeft:4 }}
+            >
+              <option value="angel_one">Angel One</option>
+              <option value="upstox">Upstox</option>
+            </select>
+          </div>
           <div className="flex-center gap-2 text-sm text-muted">
             <span className="status-dot green" />
             Live

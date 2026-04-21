@@ -74,6 +74,8 @@ html, body, #root {
   -webkit-text-fill-color: transparent;
 }
 .topbar-right { display: flex; align-items: center; gap: 16px; }
+.topbar-right select { color-scheme: dark; }
+.topbar-right select option { background: #1a2235; color: #f1f5f9; }
 .mode-badge {
   padding: 4px 12px;
   border-radius: 20px;
