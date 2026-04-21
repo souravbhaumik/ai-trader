@@ -66,10 +66,15 @@ async def get_adapter_for_user(
         if cached and cached.get("jwt_token"):
             try:
                 from SmartApi import SmartConnect  # type: ignore
+                # Strip "Bearer " prefix if present — the SDK's setAccessToken
+                # stores the raw token and prepends "Bearer " itself in headers.
+                raw_token = cached["jwt_token"]
+                if raw_token.startswith("Bearer "):
+                    raw_token = raw_token[len("Bearer "):]
                 adapter._smart_api = SmartConnect(api_key=adapter._api_key)
                 adapter._smart_api.setSessionExpiryHook(lambda: None)
-                adapter._auth_token = cached["jwt_token"]
-                adapter._smart_api.setAccessToken(cached["jwt_token"])
+                adapter._auth_token = raw_token
+                adapter._smart_api.setAccessToken(raw_token)
                 if cached.get("feed_token"):
                     adapter._smart_api.setFeedToken(cached["feed_token"])
                 logger.info("angel_one_session_restored", user_id=str(user_id))
@@ -84,13 +89,17 @@ async def get_adapter_for_user(
                 "Angel One authentication failed. Check your credentials in Settings → Broker."
             )
 
-        # Cache the new session
+        # Cache the new session — store the raw token (no "Bearer " prefix)
+        # so that session restore can call setAccessToken() without double-prefixing.
         try:
             from app.core.redis_client import cache_broker_session
+            raw_token = getattr(adapter._smart_api, "access_token", None) or adapter._auth_token or ""
+            if raw_token.startswith("Bearer "):
+                raw_token = raw_token[len("Bearer "):]
             await cache_broker_session(
                 str(user_id),
                 "angel_one",
-                adapter._auth_token or "",
+                raw_token,
                 getattr(adapter._smart_api, "feed_token", None),
             )
         except Exception as exc:

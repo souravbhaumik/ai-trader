@@ -22,14 +22,14 @@ export default function LoginPage() {
   const setAuth = useAuthStore((s) => s.setAuth)
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
 
-  // Redirect already-authenticated users to home
-  if (isAuthenticated()) return <Navigate to="/" replace />
-
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [totpCode, setTotpCode] = useState('')
   const [showTotp, setShowTotp] = useState(false)
   const [loading, setLoading] = useState(false)
+
+  // Redirect already-authenticated users to home
+  if (isAuthenticated()) return <Navigate to="/" replace />
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()

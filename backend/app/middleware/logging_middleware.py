@@ -34,7 +34,8 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                 path=sanitized,
                 error=str(exc),
             )
-            raise
+            from starlette.responses import JSONResponse
+            return JSONResponse({"detail": "Internal server error"}, status_code=500)
 
         duration_ms = round((time.perf_counter() - start) * 1000, 1)
         logger.info(

@@ -123,7 +123,7 @@ class AuthService:
             return  # Already revoked or unknown — safe no-op
 
         now = _utcnow()
-        remaining = rt.expires_at - now
+        remaining = _strip_tz(rt.expires_at) - now
         if remaining.total_seconds() > 0:
             redis = get_redis()
             await redis.setex(
