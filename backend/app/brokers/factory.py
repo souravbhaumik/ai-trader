@@ -1,4 +1,4 @@
-﻿"""Broker adapter factory.
+"""Broker adapter factory.
 
 Resolves the correct BrokerAdapter for a given user based on their
 `preferred_broker` setting and their stored (decrypted) credentials.
@@ -28,16 +28,23 @@ async def get_adapter_for_user(
 ) -> BrokerAdapter:
     """Return the correct BrokerAdapter for the user.
 
-    Priority:
-      1. User's personal Angel One credentials (from broker_credentials table).
-      2. User's personal Upstox credentials (from broker_credentials table).
+    This adapter is used for ORDER EXECUTION (place_order, cancel_order,
+    get_positions, get_holdings) and as a live price FALLBACK only.
 
-    Raises ValueError if no broker is configured — callers must handle this.
+    Live prices are sourced from NSEIndiaAdapter in price_service.py and
+    do not depend on the user having a broker configured.
+
+    Priority for order execution:
+      1. User's personal Angel One credentials
+      2. User's personal Upstox credentials
+
+    If no broker is configured, returns YFinanceAdapter (whose live price
+    methods return empty, so NSEIndiaAdapter stays primary transparently).
     """
     if not preferred_broker:
-        raise ValueError(
-            "No broker configured. Add Angel One or Upstox credentials in Settings → Broker."
-        )
+        from app.brokers.yfinance_adapter import YFinanceAdapter  # noqa: PLC0415
+        logger.info("no_broker_configured_nse_handles_live_prices", user_id=user_id)
+        return YFinanceAdapter()
 
     creds = await _load_credentials(user_id, preferred_broker, db)
 

@@ -1,4 +1,4 @@
-﻿"""WebSocket endpoints for live price and signal streaming.
+"""WebSocket endpoints for live price and signal streaming.
 
 Price URL:  ``ws://<host>/api/v1/ws/prices?token=<jwt>&symbols=RELIANCE.NS,TCS.NS``
 Signal URL: ``ws://<host>/api/v1/ws/signals?token=<jwt>``
@@ -114,35 +114,30 @@ manager = ConnectionManager()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Single shared price fetcher (runs in a thread pool)
+#  Single shared price fetcher — NSE India primary, broker fallback
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _fetch_prices_sync(symbols: list) -> list:
-    """Fetch live prices via the shared broker credential pool.
+async def _fetch_prices_async(symbols: list) -> list:
+    """Fetch live prices via price_service (NSE primary → broker fallback).
 
-    Falls back to Google Finance scraping when the pool returns no data
-    (e.g. expired Upstox token or empty Angel One credential pool).
+    Routes through price_service so the 30s Redis cache is shared with REST
+    endpoints. A single NSE call every 30s serves all WS ticks and REST
+    requests combined — guaranteed safe rate regardless of user count.
     """
-    normalized = [str(s).upper().strip() for s in symbols if str(s).strip()]
+    from app.brokers.yfinance_adapter import YFinanceAdapter  # noqa: PLC0415
+    from app.services import price_service  # noqa: PLC0415
+
+    normalized = [str(s).upper().strip().replace(".NS", "").replace(".BO", "")
+                  for s in symbols if str(s).strip()]
     if not normalized:
         return []
 
-    # Primary: Angel One credential pool
     try:
-        from app.brokers.credential_pool import get_quotes_batch_via_pool
-        prices = get_quotes_batch_via_pool(normalized)
-        if prices:
-            return prices
+        # YFinanceAdapter returns [] for live, so NSE stays primary inside price_service
+        quotes = await price_service.get_quotes_batch(YFinanceAdapter(), normalized)
+        return [q.__dict__ for q in quotes]
     except Exception as exc:
-        logger.warning("ws.pool_price_fetch_failed", err=str(exc))
-
-    # Fallback: Google Finance scraping
-    try:
-        from app.brokers.google_finance_adapter import get_quotes_via_google_finance
-        logger.info("ws.price_fallback_to_google_finance", count=len(normalized))
-        return get_quotes_via_google_finance(normalized)
-    except Exception as exc:
-        logger.warning("ws.google_finance_fallback_failed", err=str(exc))
+        logger.warning("ws.price_fetch_failed", err=str(exc))
         return []
 
 
@@ -156,14 +151,13 @@ async def price_broadcaster() -> None:
     Called once from ``app.main.lifespan``; runs for the process lifetime.
     Sleeps first so the first fetch happens after clients have connected.
     """
-    loop = asyncio.get_running_loop()
     while True:
         await asyncio.sleep(_PUSH_INTERVAL_SECS)
         try:
             symbols = list(manager.all_symbols())
             if not symbols:
                 continue
-            prices = await loop.run_in_executor(None, _fetch_prices_sync, symbols)
+            prices = await _fetch_prices_async(symbols)
             if prices:
                 await manager.broadcast(prices)
         except Exception as exc:  # noqa: BLE001

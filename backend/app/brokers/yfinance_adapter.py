@@ -1,9 +1,19 @@
-﻿"""yfinance broker adapter — free NSE fallback.
+"""yfinance broker adapter — historical OHLCV data only.
 
-Uses Yahoo Finance (15-min delayed during market hours, free, no API key).
-All network calls run in a thread pool to avoid blocking the async event loop.
-Retries use tenacity (3 attempts, exponential back-off). A module-level circuit
-breaker opens after 5 consecutive failures and half-opens after 60 seconds.
+This adapter's ONLY active function is get_history(), which fetches
+historical OHLCV bars from Yahoo Finance via yf.download(). It is the
+sole source for historical data in this codebase.
+
+Live price methods (get_quote, get_quotes_batch, get_indices) are
+intentionally disabled — they return None / empty list. All live prices
+are sourced from NSEIndiaAdapter with broker API as fallback.
+
+The 15-minute delay of Yahoo Finance is irrelevant for historical
+backfill, ML training datasets, and chart rendering.
+
+Retries use tenacity (3 attempts, exponential back-off). A module-level
+circuit breaker opens after 5 consecutive failures and half-opens after
+60 seconds.
 """
 from __future__ import annotations
 
@@ -65,18 +75,23 @@ _yf_retry = retry(
     reraise=True,
 )
 
-# Nifty indices as Yahoo Finance symbols
+# Nifty indices as Yahoo Finance symbols (kept for reference, not used actively)
 _INDICES = {
     "^NSEI":      "Nifty 50",
     "^BSESN":     "Sensex",
     "^NSEBANK":   "Bank Nifty",
-    "^CNXIT":     "Nifty IT",       # ^CNXIT is the actual index; NIFTYIT.NS is an ETF
+    "^CNXIT":     "Nifty IT",
     "^CNXPHARMA": "Nifty Pharma",
     "^CNXAUTO":   "Nifty Auto",
 }
 
 
 class YFinanceAdapter(BrokerAdapter):
+    """Historical OHLCV data only — live methods disabled.
+
+    Use NSEIndiaAdapter (via price_service) for all live prices.
+    """
+
     broker_name = "yfinance"
 
     # ── Helpers ───────────────────────────────────────────────────────────────
@@ -95,33 +110,18 @@ class YFinanceAdapter(BrokerAdapter):
         except Exception:
             return 0.0
 
-    # ── BrokerAdapter interface ───────────────────────────────────────────────
+    # ── Live methods — DISABLED ───────────────────────────────────────────────
 
     async def get_quote(self, symbol: str) -> Optional[Quote]:
-        """Live quotes disabled — no broker configured. Returns a zero-priced Quote."""
-        return Quote(
-            symbol=symbol, price=0.0, prev_close=0.0, change=0.0, change_pct=0.0,
-            volume=0, high=0.0, low=0.0, open=0.0,
-            timestamp=datetime.utcnow().isoformat(),
-        )
+        """Disabled — NSEIndiaAdapter handles all live quotes."""
+        return None
 
     async def get_quotes_batch(self, symbols: List[str]) -> List[Quote]:
-        """Live batch quotes disabled — no broker configured. Returns empty list."""
+        """Disabled — NSEIndiaAdapter handles all live quotes."""
         return []
 
-    async def get_history(
-        self,
-        symbol: str,
-        period: str = "1y",
-        interval: str = "1d",
-    ) -> List[OHLCVBar]:
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            None, self._sync_history, symbol, period, interval
-        )
-
     async def get_indices(self) -> List[Quote]:
-        """Live index quotes disabled — no broker configured. Returns empty list."""
+        """Disabled — NSEIndiaAdapter handles all live index quotes."""
         return []
 
     # ── Sync implementations (run in thread pool) ─────────────────────────────

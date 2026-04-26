@@ -20,7 +20,8 @@ cryptography==42.0.8         # Fernet for TOTP secret encryption
 redis[hiredis]==5.0.8
 
 # ─── HTTP client ──────────────────────────────────────────────────────────────
-httpx==0.27.2
+httpx==0.27.2                   # Internal HTTP calls (broker SDKs, etc.)
+curl-cffi==0.7.3                # NSE India adapter — Chrome TLS fingerprint impersonation
 
 # ─── Settings & Config ────────────────────────────────────────────────────────
 pydantic-settings==2.3.4

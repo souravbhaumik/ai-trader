@@ -1,4 +1,4 @@
-﻿"""Celery application — Phase 2 background task queue.
+"""Celery application — Phase 2 background task queue.
 
 Broker: Redis (same instance used for JWT blocklist and caching).
 All tasks run as regular (non-async) functions in separate worker processes.
@@ -38,6 +38,7 @@ celery_app = Celery(
         "app.tasks.intraday_signal_generator",
         "app.tasks.upstox_token_refresh",
         "app.tasks.fundamentals_ingest",
+        "app.tasks.breaking_news_scanner",
     ],
 )
 
@@ -85,10 +86,36 @@ celery_app.conf.beat_schedule = {
         "task":     "app.tasks.signal_outcome_evaluation.evaluate_signal_outcomes",
         "schedule": crontab(hour=8, minute=20, day_of_week="1-5"),  # Mon–Fri 8:20 AM IST
     },
-    # News sentiment pipeline — every 15 min during market hours
+    # News sentiment pipeline — every 15 min during market hours + post-market
+    # Extended to 16:15 to capture post-close results and corporate announcements.
     "news-sentiment-pipeline": {
         "task":     "app.tasks.news_sentiment.fetch_news_sentiment",
-        "schedule": crontab(hour="9-15", minute="*/15", day_of_week="1-5"),  # Mon–Fri 9:00 AM – 3:45 PM IST
+        "schedule": crontab(hour="9-16", minute="*/15", day_of_week="1-5"),
+    },
+    # Pre-market news warm-up — 7:30 AM IST (Asian market open, FII pre-data, overnight news)
+    # Seeds the sentiment cache before the broker reconnect (8:00 AM) and signals (8:30 AM).
+    "news-sentiment-premarket": {
+        "task":     "app.tasks.news_sentiment.fetch_news_sentiment",
+        "schedule": crontab(hour=7, minute=30, day_of_week="1-5"),
+    },
+    # Pre-signal warm-up — 8:20 AM IST (10 min before pre-market signal generation)
+    # Ensures sentiment cache is maximally fresh for the 8:30 AM signal run.
+    "news-sentiment-pre-signal": {
+        "task":     "app.tasks.news_sentiment.fetch_news_sentiment",
+        "schedule": crontab(hour=8, minute=20, day_of_week="1-5"),
+    },
+    # Post-market news run — 4:40 PM IST (5 min before EOD signal generation at 4:45 PM)
+    # Captures post-close earnings, corporate actions, and end-of-session FII/DII data.
+    "news-sentiment-post-market": {
+        "task":     "app.tasks.news_sentiment.fetch_news_sentiment",
+        "schedule": crontab(hour=16, minute=40, day_of_week="1-5"),
+    },
+    # Breaking news fast-path scanner — every 2 minutes during market hours.
+    # Keyword-matches 4 fast free sources; triggers full sentiment fetch on high-impact hits.
+    # Reduces breaking news latency from 15 minutes → ~2 minutes.
+    "breaking-news-scanner": {
+        "task":     "app.tasks.breaking_news_scanner.scan_breaking_news",
+        "schedule": crontab(hour="9-16", minute="*/2", day_of_week="1-5"),
     },
     # LightGBM weekly retrain — Saturday 2:00 AM IST (off-market, low load)
     "lgbm-weekly-retrain": {

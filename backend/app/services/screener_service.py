@@ -1,4 +1,4 @@
-﻿"""Screener service — live stock screener backed by the stock_universe table.
+"""Screener service — live stock screener backed by the stock_universe table.
 
 Fetches live quotes for the requested page of stocks via the user's configured
 broker adapter.  When no broker is configured, all price fields are 0.00 —
@@ -107,7 +107,8 @@ async def get_screener_page(
 
     if not quote_map:
         try:
-            quotes = await adapter.get_quotes_batch(symbols)
+            from app.services import price_service  # noqa: PLC0415
+            quotes = await price_service.get_quotes_batch(adapter, symbols)
             quote_map = {q.symbol: q.__dict__ for q in quotes}
         except Exception as e:
             logger.error("screener_quotes_failed", err=str(e))

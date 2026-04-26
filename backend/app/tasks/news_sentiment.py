@@ -1,4 +1,4 @@
-﻿"""News sentiment ingestion task — Phase 4.
+"""News sentiment ingestion task — Phase 4.
 
 Runs every 15 minutes during market hours (Mon–Fri 9:00 AM – 4:00 PM IST).
 
@@ -31,7 +31,7 @@ from app.tasks.celery_app import celery_app
 logger = structlog.get_logger(__name__)
 
 _SENTIMENT_KEY_PREFIX = "sentiment:"
-_SENTIMENT_TTL_SECS   = 7200   # 2 hours
+_SENTIMENT_TTL_SECS   = 50400  # 14 hours — survives overnight; 4:45 PM → still valid at 8:30 AM
 _ROLLING_WINDOW_HOURS = 24
 
 
