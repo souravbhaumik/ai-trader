@@ -40,7 +40,7 @@ function StatCard({ icon, label, value, sub, accent }: {
       <div className="stat-label">{label}</div>
       <div className="stat-value" style={accent === 'green' || accent === 'red' ? { color } : undefined}>{value}</div>
       <div className="stat-sub text-muted">{sub}</div>
-      <div style={{ position:'absolute', top:0, left:0, right:0, height:2, background: `linear-gradient(90deg, ${color}, transparent)`, borderRadius:'16px 16px 0 0' }} />
+      <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 2, background: `linear-gradient(90deg, ${color}, transparent)`, borderRadius: '16px 16px 0 0' }} />
     </div>
   )
 }
@@ -56,7 +56,7 @@ function TickerTape({ items }: { items: ScreenerRow[] }) {
           const up = (r.change_pct ?? 0) >= 0
           return (
             <div key={i} className="ticker-tape-item">
-              <span className="ticker-tape-sym">{r.symbol.replace('.NS','')}</span>
+              <span className="ticker-tape-sym">{r.symbol.replace('.NS', '')}</span>
               <span className="ticker-tape-price">
                 {r.price != null ? `₹${r.price.toLocaleString('en-IN', { maximumFractionDigits: 2 })}` : '—'}
               </span>
@@ -93,11 +93,11 @@ function LivePriceItem({ row }: { row: ScreenerRow }) {
   const up = (row.change_pct ?? 0) >= 0
   return (
     <div ref={ref} className="live-price-row" style={{ borderRadius: 8, padding: '10px 4px' }}>
-      <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         <TickerLogo symbol={row.symbol} size={28} />
         <div>
-          <div className="live-price-sym">{row.symbol.replace('.NS','')}</div>
-          {row.name && <div className="live-price-name">{row.name.length > 22 ? row.name.slice(0,22)+'…' : row.name}</div>}
+          <div className="live-price-sym">{row.symbol.replace('.NS', '')}</div>
+          {row.name && <div className="live-price-name">{row.name.length > 22 ? row.name.slice(0, 22) + '…' : row.name}</div>}
         </div>
       </div>
       <div className="live-price-val">
@@ -119,11 +119,11 @@ export default function DashboardPage() {
   const tradingMode = useAuthStore(s => s.tradingMode)
   const brokerUpdatedAt = useAuthStore(s => s.brokerUpdatedAt)
   const navigate = useNavigate()
-  const [forecastSym, setForecastSym]     = useState<string | null>(null)
+  const [forecastSym, setForecastSym] = useState<string | null>(null)
   const [orderDefaults, setOrderDefaults] = useState<OrderDefaults | null>(null)
 
   const now = new Date()
-  const dateStr = now.toLocaleDateString('en-IN', { weekday:'long', day:'numeric', month:'long', year:'numeric' })
+  const dateStr = now.toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
 
   const { data: indicesData, isLoading: indicesLoading, error: indicesError } = useQuery({
     queryKey: ['indices', brokerUpdatedAt],
@@ -166,15 +166,15 @@ export default function DashboardPage() {
   const loading = indicesLoading || signalsLoading
   const activeCount: number = signalsData?.total ?? signals.filter(s => s.signal_type !== 'HOLD').length
 
-  const portfolioValue   = portfolioData ? portfolioData.cash_balance + portfolioData.open_value : null
+  const portfolioValue = portfolioData ? portfolioData.cash_balance + portfolioData.open_value : null
   const portfolioValueStr = portfolioValue !== null ? '₹' + portfolioValue.toLocaleString('en-IN', { maximumFractionDigits: 0 }) : '…'
-  const portfolioSub      = portfolioData ? `${portfolioData.open_positions} position${portfolioData.open_positions !== 1 ? 's' : ''} · ₹${portfolioData.cash_balance.toLocaleString('en-IN', { maximumFractionDigits: 0 })} cash` : 'Loading…'
-  const pnlPositive       = portfolioData ? portfolioData.realized_pnl >= 0 : null
-  const pnlStr            = portfolioData ? (portfolioData.realized_pnl >= 0 ? '+' : '') + '₹' + portfolioData.realized_pnl.toLocaleString('en-IN', { maximumFractionDigits: 0 }) : '…'
-  const pnlSub            = portfolioData ? (portfolioData.closed_trades > 0 ? `${portfolioData.closed_trades} closed trades` : 'No closed trades yet') : 'Loading…'
-  const winRateStr        = portfolioData?.win_rate != null ? portfolioData.win_rate.toFixed(1) + '%' : '—'
+  const portfolioSub = portfolioData ? `${portfolioData.open_positions} position${portfolioData.open_positions !== 1 ? 's' : ''} · ₹${portfolioData.cash_balance.toLocaleString('en-IN', { maximumFractionDigits: 0 })} cash` : 'Loading…'
+  const pnlPositive = portfolioData ? portfolioData.realized_pnl >= 0 : null
+  const pnlStr = portfolioData ? (portfolioData.realized_pnl >= 0 ? '+' : '') + '₹' + portfolioData.realized_pnl.toLocaleString('en-IN', { maximumFractionDigits: 0 }) : '…'
+  const pnlSub = portfolioData ? (portfolioData.closed_trades > 0 ? `${portfolioData.closed_trades} closed trades` : 'No closed trades yet') : 'Loading…'
+  const winRateStr = portfolioData?.win_rate != null ? portfolioData.win_rate.toFixed(1) + '%' : '—'
 
-  const lastUpdate = dataUpdatedAt ? new Date(dataUpdatedAt).toLocaleTimeString('en-IN', { timeStyle:'short' }) : null
+  const lastUpdate = dataUpdatedAt ? new Date(dataUpdatedAt).toLocaleTimeString('en-IN', { timeStyle: 'short' }) : null
 
   return (
     <div className="dashboard">
@@ -186,8 +186,8 @@ export default function DashboardPage() {
         </div>
         <div className="page-header-actions">
           {lastUpdate && <span className="text-muted text-sm">Updated {lastUpdate}</span>}
-          <button className="btn btn-outline flex-center gap-2" onClick={() => refetchScreener()} disabled={screenerLoading} style={{ padding:'6px 12px' }}>
-            <RefreshCw size={13} style={screenerLoading ? { animation:'spin 1s linear infinite' } : undefined} />
+          <button className="btn btn-outline flex-center gap-2" onClick={() => refetchScreener()} disabled={screenerLoading} style={{ padding: '6px 12px' }}>
+            <RefreshCw size={13} style={screenerLoading ? { animation: 'spin 1s linear infinite' } : undefined} />
             Refresh
           </button>
         </div>
@@ -195,15 +195,15 @@ export default function DashboardPage() {
 
       {/* ── Stat Row ──────────────────────────────────────────────────────── */}
       <div className="stat-grid">
-        <StatCard icon={<Wallet size={18}/>}
+        <StatCard icon={<Wallet size={18} />}
           label={tradingMode === 'paper' ? 'Paper Portfolio' : 'Portfolio Value'}
           value={portfolioValueStr} sub={portfolioSub} />
-        <StatCard icon={pnlPositive !== false ? <TrendingUp size={18}/> : <TrendingDown size={18}/>}
+        <StatCard icon={pnlPositive !== false ? <TrendingUp size={18} /> : <TrendingDown size={18} />}
           label="Realized P&L" value={pnlStr} sub={pnlSub}
           accent={pnlPositive === true ? 'green' : pnlPositive === false ? 'red' : undefined} />
-        <StatCard icon={<Target size={18}/>}
+        <StatCard icon={<Target size={18} />}
           label="Win Rate" value={winRateStr} sub={pnlSub.includes('closed') ? pnlSub : 'No closed trades'} accent="blue" />
-        <StatCard icon={<Clock size={18}/>}
+        <StatCard icon={<Clock size={18} />}
           label="Active Signals" value={loading ? '…' : String(activeCount)} sub="From ML pipeline" accent="yellow" />
       </div>
 
@@ -220,7 +220,7 @@ export default function DashboardPage() {
                 <span className="index-name">{q.name ?? q.symbol}</span>
                 <span className="index-price">{q.price.toLocaleString('en-IN', { maximumFractionDigits: 2 })}</span>
                 <span className={`index-chg ${up ? 'green' : 'red'}`}>
-                  {up ? <TrendingUp size={11}/> : <TrendingDown size={11}/>}
+                  {up ? <TrendingUp size={11} /> : <TrendingDown size={11} />}
                   {up ? '+' : ''}{q.change_pct.toFixed(2)}%
                 </span>
               </div>
@@ -238,10 +238,10 @@ export default function DashboardPage() {
             {!loading && <span className="text-muted text-sm">{activeCount} active</span>}
           </div>
           {loading ? (
-            <div className="empty-state"><Activity size={28}/><p>Loading…</p></div>
+            <div className="empty-state"><Activity size={28} /><p>Loading…</p></div>
           ) : signals.length === 0 ? (
             <div className="empty-state">
-              <Activity size={36}/>
+              <Activity size={36} />
               <p>Signals appear here once the ML pipeline is running.</p>
             </div>
           ) : (
@@ -253,9 +253,9 @@ export default function DashboardPage() {
                 {signals.map(s => (
                   <tr key={s.id}>
                     <td>
-                      <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                         <TickerLogo symbol={s.symbol} size={26} />
-                        <span className="text-mono" style={{ fontWeight:600 }}>{s.symbol.replace('.NS','')}</span>
+                        <span className="text-mono" style={{ fontWeight: 600 }}>{s.symbol.replace('.NS', '')}</span>
                       </div>
                     </td>
                     <td>
@@ -265,18 +265,18 @@ export default function DashboardPage() {
                       >{s.signal_type}</span>
                     </td>
                     <td>
-                      <div style={{ display:'flex', alignItems:'center', gap:8 }}>
-                        <div style={{ flex:1, height:4, background:'var(--bg-hover)', borderRadius:2, overflow:'hidden', minWidth:48 }}>
-                          <div style={{ height:'100%', width:`${(s.confidence*100).toFixed(0)}%`, background:'linear-gradient(90deg,var(--blue),var(--purple))', borderRadius:2 }}/>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <div style={{ flex: 1, height: 4, background: 'var(--bg-hover)', borderRadius: 2, overflow: 'hidden', minWidth: 48 }}>
+                          <div style={{ height: '100%', width: `${(s.confidence * 100).toFixed(0)}%`, background: 'linear-gradient(90deg,var(--blue),var(--purple))', borderRadius: 2 }} />
                         </div>
                         <span className="text-mono text-sm">{(s.confidence * 100).toFixed(0)}%</span>
                       </div>
                     </td>
                     <td className="text-mono">{s.entry_price != null ? `₹${s.entry_price.toLocaleString('en-IN')}` : '—'}</td>
                     <td className="text-mono">{s.target_price != null ? `₹${s.target_price.toLocaleString('en-IN')}` : '—'}</td>
-                    <td className="text-muted text-sm">{new Date(s.ts + 'Z').toLocaleTimeString('en-IN', { timeStyle:'short' })}</td>
+                    <td className="text-muted text-sm">{new Date(s.ts + 'Z').toLocaleTimeString('en-IN', { timeStyle: 'short' })}</td>
                     <td>
-                      <button className="btn-outline btn" style={{ padding:'3px 8px', fontSize:11 }} onClick={() => setForecastSym(s.symbol)}>📈</button>
+                      <button className="btn-outline btn" style={{ padding: '3px 8px', fontSize: 11 }} onClick={() => setForecastSym(s.symbol)}>📈</button>
                     </td>
                   </tr>
                 ))}
@@ -288,16 +288,16 @@ export default function DashboardPage() {
         {/* Right column */}
         <div className="dash-col">
           {/* Live Prices */}
-          <div className="card" style={{ flex:1 }}>
+          <div className="card" style={{ flex: 1 }}>
             <div className="card-header">
               <span className="card-title">Live Prices</span>
-              {screenerLoading && <RefreshCw size={12} style={{ color:'var(--text-muted)', animation:'spin 1s linear infinite' }}/>}
+              {screenerLoading && <RefreshCw size={12} style={{ color: 'var(--text-muted)', animation: 'spin 1s linear infinite' }} />}
             </div>
             {screenerRows.length === 0 ? (
-              <div className="empty-state" style={{ padding:'24px 0' }}>
-                <Activity size={28}/>
-                <p style={{ fontSize:12 }}>No broker configured.</p>
-                <button className="btn btn-outline" style={{ fontSize:12, marginTop:8 }} onClick={() => navigate('/settings')}>
+              <div className="empty-state" style={{ padding: '24px 0' }}>
+                <Activity size={28} />
+                <p style={{ fontSize: 12 }}>No broker configured.</p>
+                <button className="btn btn-outline" style={{ fontSize: 12, marginTop: 8 }} onClick={() => navigate('/settings')}>
                   Set up broker →
                 </button>
               </div>
@@ -315,11 +315,11 @@ export default function DashboardPage() {
               {indices.map((q: IndexQuote) => (
                 <div key={q.symbol} className="live-price-row" style={{ padding: '8px 4px' }}>
                   <div>
-                    <div style={{ fontWeight:600, fontSize:13 }}>{q.name ?? q.symbol}</div>
+                    <div style={{ fontWeight: 600, fontSize: 13 }}>{q.name ?? q.symbol}</div>
                     <div className="text-muted text-sm">{q.symbol}</div>
                   </div>
-                  <div style={{ textAlign:'right' }}>
-                    <div className="text-mono text-sm" style={{ fontWeight:600 }}>{q.price.toLocaleString('en-IN', { maximumFractionDigits:2 })}</div>
+                  <div style={{ textAlign: 'right' }}>
+                    <div className="text-mono text-sm" style={{ fontWeight: 600 }}>{q.price.toLocaleString('en-IN', { maximumFractionDigits: 2 })}</div>
                     <div className={`live-price-chg ${q.change_pct >= 0 ? 'up' : 'down'}`}>
                       {q.change_pct >= 0 ? '▲' : '▼'} {Math.abs(q.change_pct).toFixed(2)}%
                     </div>

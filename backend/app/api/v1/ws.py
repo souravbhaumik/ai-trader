@@ -118,16 +118,31 @@ manager = ConnectionManager()
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _fetch_prices_sync(symbols: list) -> list:
-    """Fetch live prices via the shared broker credential pool."""
+    """Fetch live prices via the shared broker credential pool.
+
+    Falls back to Google Finance scraping when the pool returns no data
+    (e.g. expired Upstox token or empty Angel One credential pool).
+    """
+    normalized = [str(s).upper().strip() for s in symbols if str(s).strip()]
+    if not normalized:
+        return []
+
+    # Primary: Angel One credential pool
     try:
         from app.brokers.credential_pool import get_quotes_batch_via_pool
-
-        normalized = [str(s).upper().strip() for s in symbols if str(s).strip()]
-        if not normalized:
-            return []
-        return get_quotes_batch_via_pool(normalized)
+        prices = get_quotes_batch_via_pool(normalized)
+        if prices:
+            return prices
     except Exception as exc:
         logger.warning("ws.pool_price_fetch_failed", err=str(exc))
+
+    # Fallback: Google Finance scraping
+    try:
+        from app.brokers.google_finance_adapter import get_quotes_via_google_finance
+        logger.info("ws.price_fallback_to_google_finance", count=len(normalized))
+        return get_quotes_via_google_finance(normalized)
+    except Exception as exc:
+        logger.warning("ws.google_finance_fallback_failed", err=str(exc))
         return []
 
 

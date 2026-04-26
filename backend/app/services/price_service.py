@@ -2,6 +2,7 @@
 
 Handles caching in Redis (60-second TTL for quotes, 5-min for indices)
 so rapid API calls don't hammer the underlying data source.
+Falls back to Google Finance scraping when the primary broker returns no data.
 """
 from __future__ import annotations
 
@@ -11,7 +12,10 @@ from typing import List, Optional
 import structlog
 
 from app.brokers.base import BrokerAdapter, OHLCVBar, Quote
+from app.brokers.google_finance_adapter import GoogleFinanceAdapter
 from app.core.redis_client import get_redis
+
+_gf_adapter = GoogleFinanceAdapter()
 
 logger = structlog.get_logger(__name__)
 
@@ -78,7 +82,11 @@ async def get_quotes_batch(adapter: BrokerAdapter, symbols: List[str]) -> List[Q
                     pass
         return out
 
-    return await adapter.get_quotes_batch(symbols)
+    quotes = await adapter.get_quotes_batch(symbols)
+    if not quotes:
+        logger.info("price_service.fallback_to_google_finance", count=len(symbols))
+        quotes = await _gf_adapter.get_quotes_batch(symbols)
+    return quotes
 
 
 async def get_history(
@@ -124,6 +132,9 @@ async def get_indices(adapter: BrokerAdapter) -> List[Quote]:
             redis = None
 
     quotes = await adapter.get_indices()
+    if not quotes:
+        logger.info("price_service.indices_fallback_to_google_finance")
+        quotes = await _gf_adapter.get_indices()
     if quotes and redis:
         try:
             await redis.setex(cache_key, _INDEX_TTL, json.dumps([q.__dict__ for q in quotes]))
