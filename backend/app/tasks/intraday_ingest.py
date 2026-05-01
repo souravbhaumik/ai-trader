@@ -14,7 +14,7 @@ signal generation. No user context is needed.
 """
 from __future__ import annotations
 
-import logging
+import structlog
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
@@ -27,7 +27,7 @@ from app.tasks.task_utils import (
     append_task_log, clear_task_logs, now_iso, write_task_status,
 )
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 _TASK       = "intraday_ingest"
 _INTERVAL   = "15m"         # candle interval
 _BATCH_SIZE = 25            # symbols per batch

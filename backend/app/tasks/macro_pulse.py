@@ -9,13 +9,11 @@ Redis keys written:
 """
 from __future__ import annotations
 
-import json
-import asyncio
-import logging
+import structlog
 
 from app.tasks.celery_app import celery_app
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 _REGIME_KEY = "macro:sentiment:regime"
 _EVENTS_KEY = "macro:top_events"
@@ -71,4 +69,4 @@ def update_macro_regime(self) -> dict:
 
     except Exception as exc:
         logger.error("macro_pulse.failed", err=str(exc))
-        return {"error": str(exc)}
+        raise
