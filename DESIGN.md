@@ -1,7 +1,7 @@
 # AI Trader — System Design Document
 
-> **Version**: 2.0  
-> **Last Updated**: April 2026  
+> **Version**: 3.0  
+> **Last Updated**: May 2026  
 > **Status**: Production-Ready
 
 AI Trader is a full-stack algorithmic trading platform for Indian equity markets (NSE/BSE). It combines technical analysis, machine learning signal generation, news sentiment analysis, and multi-broker integration to provide automated and semi-automated trading capabilities.
@@ -905,3 +905,278 @@ ai-trader/
 | `backfill:progress`                  | -          | Backfill progress %          |
 | `pool:degraded:{credential_id}`      | 5 minutes  | Degraded credential cooldown |
 | `pipeline_task_status:{task}`        | -          | Task execution status        |
+
+---
+
+## 16. NSE Data Architecture
+
+### 16.1 Live Price Data Flow
+
+```
+REQUEST
+  │
+  ▼
+Redis Cache (30s TTL)
+  ├── HIT  → return instantly (zero external calls)
+  └── MISS
+        │
+        ▼
+   NSE India API  ← PRIMARY (1 call = all 50 symbols, ~15s delay, free)
+        ├── SUCCESS → cache in Redis → return
+        └── FAIL (maintenance / Akamai block)
+              │
+              ▼
+         Broker API  ← FALLBACK (Angel One / Upstox, per user)
+               └── SUCCESS / partial → cache in Redis → return
+```
+
+### 16.2 Historical Data Flow
+
+```
+REQUEST → Redis Cache (5 min TTL)
+  └── MISS
+        │
+        ▼
+   YFinance  ← ONLY source (free, years of NSE data, delay irrelevant for history)
+        └── returns bars or empty list
+```
+
+### 16.3 Adapter Responsibility Matrix
+
+| Adapter | Live Quotes | Indices | History | Orders |
+|---------|-------------|---------|---------|--------|
+| `NSEIndiaAdapter` | ✅ **PRIMARY** | ✅ **PRIMARY** | ❌ | ❌ |
+| `YFinanceAdapter` | ❌ Disabled | ❌ Disabled | ✅ **ONLY SOURCE** | ❌ |
+| `AngelOneAdapter` | ✅ Fallback | ✅ Fallback | ❌ | ✅ |
+| `UpstoxAdapter` | ✅ Fallback | ✅ Fallback | ❌ | ✅ |
+
+### 16.4 NSE India Adapter Key Details
+
+- **Endpoints**: `/api/equity-stockIndices?index=NIFTY%2050` (bulk), `/api/allIndices`, `/api/quote-equity?symbol=<SYM>`
+- **Session**: `curl_cffi` with `impersonate="chrome124"` for TLS fingerprint bypass
+- **Circuit Breaker**: 5 failures → 120s recovery pause (module-level, not per-request)
+- **Known Issue**: Local `threading.Lock()` is not visible across Celery worker processes. A Redis distributed lock is needed to prevent session stampede when cookies expire simultaneously across 4+ workers.
+
+### 16.5 Redis Cache Key Reference (NSE)
+
+| Key | TTL | Notes |
+|-----|-----|-------|
+| `nse:quotes:{symbols_sorted}` | 30s | Shared, all users |
+| `nse:indices` | 30s | Shared, all users |
+| `history:{sym}:{period}:{interval}` | 5min | Broker-agnostic |
+| `fundamentals:{SYMBOL}` | 24h | yfinance PE/ROE/etc |
+| `sentiment:{SYMBOL}` | 2h | FinBERT per-stock score |
+| `macro:sentiment:regime` | 30min | HDBSCAN regime label |
+| `macro:news:score` | 2h | FinBERT macro headlines score |
+
+---
+
+## 17. Full Signal Pipeline (9-Phase Architecture)
+
+### 17.1 Target Signal Blend Formula
+
+```
+base_conf = 0.30×tech + 0.35×lgbm + 0.15×arf + 0.10×sentiment + 0.10×fund_score
+after_cap = min(base_conf, fund_hard_cap)
+after_drift = after_cap × (1 - drift_penalty)
+after_anomaly = after_drift × (1 - anomaly_penalty)   [if LSTM model exists]
+final_conf = min(after_anomaly × regime_multiplier, 1.0)
+```
+
+### 17.2 Signal Weight Table
+
+| Phase | Source | Weight | Status |
+|-------|--------|--------|--------|
+| Phase 1 | Technical (RSI, MACD, Bollinger, ATR, OBV, ADX) | 30% | ✅ Active |
+| Phase 5 | LightGBM (batch, weekly retrain) | 35% | ✅ Active |
+| Phase 6 | River ARF (online, daily adaptation) | 15% | ✅ Wired |
+| Phase 4 | FinBERT Sentiment | 10% | ✅ Active |
+| Phase 3b | Fundamentals quality score | 10% | ✅ Wired |
+| Phase 7 | Drift penalty (ADWIN) | modifier: up to −20% | ✅ Wired |
+| Phase 8 | Regime multiplier (HDBSCAN) | modifier: ×0.6 to ×1.1 | ✅ Wired |
+| Phase 9 | LSTM Anomaly penalty | modifier: up to −40% | ⚠ Needs model file |
+
+### 17.3 Extended Technical Features (14-feature vector)
+
+```python
+FEATURE_NAMES = [
+    "rsi_14", "macd_hist", "bb_pct_b", "atr_pct", "obv_trend", "adx_14",
+    "volume_ratio", "close_vs_sma20", "close_vs_sma50", "sentiment_score",
+    "momentum_1m",    # (close[-1] / close[-22]) - 1
+    "momentum_3m",    # (close[-1] / close[-66]) - 1
+    "hist_vol_20d",   # std(log_returns[-20:]) * sqrt(252)
+    "week52_proximity",  # (close - 52w_low) / (52w_high - 52w_low)
+]
+```
+
+### 17.4 Fundamentals Gate Rules (BUY signals only)
+
+| Condition | Confidence Cap | Rationale |
+|-----------|---------------|-----------|
+| `debt_equity > 3.0` | 0.50 | High leverage = risky |
+| `roe < 5%` | 0.60 | Poor capital efficiency |
+| `pe_ratio > 60` | 0.65 | Extremely expensive |
+| `pe_ratio < 0` (negative EPS) | 0.55 | Loss-making company |
+
+SELL signals are **not** capped — bad fundamentals reinforce bearish bias.
+
+### 17.5 Data Staleness Targets
+
+| Layer | Refresh Cadence | Max Staleness |
+|-------|----------------|---------------|
+| Live price | Angel One WebSocket | ~1 second |
+| Intraday OHLCV | Every 15 min | 15 minutes |
+| News sentiment (per-stock) | Every 15 min | 15 minutes |
+| Macro news score | Every 15 min | 15 minutes |
+| Intraday signal | Every 15 min | 15 minutes |
+| Macro regime (price-based) | Every 30 min | 30 minutes |
+| Fundamentals (PE, ROE) | Daily 8:00 PM | 24 hours |
+| EOD signal | 8:30 AM + 4:45 PM | ~8 hours overnight |
+
+### 17.6 New Services Required
+
+| File | Status | Purpose |
+|------|--------|---------|
+| `services/fundamentals_service.py` | **NEW** | yfinance PE/ROE fetch + Redis cache + score |
+| `tasks/fundamentals_ingest.py` | **NEW** | Daily 8 PM Celery task for fundamentals refresh |
+| `services/macro_news_scorer.py` | ✅ Exists | FinBERT on macro/global headlines |
+| `services/river_amf.py` | ✅ Exists | River online learning model |
+| `services/drift_detector.py` | ✅ Exists | ADWIN per-feature drift detection |
+| `services/regime_detector.py` | ✅ Exists | HDBSCAN regime classification |
+
+---
+
+## 18. IP Rotation & Anti-Ban Strategy
+
+### 18.1 Layer Architecture
+
+```
+LAYER A: TLS Fingerprint (curl_cffi)           ← Always ON
+└── impersonate Chrome/Firefox/Safari TLS stack
+    Effect: Passes Google's #1 bot check
+
+LAYER B: Google Persona Cookies                ← Always ON
+└── Pre-harvested NID/SOCS cookies via Playwright
+    Effect: Looks like returning trusted user, not new bot
+
+LAYER C: Per-IP Request Budget (Behavioural)   ← Always ON
+└── Each IP sends random(5, 10) requests, then rotates
+    Effect: Each IP looks like a normal human browsing
+
+LAYER D: IP Pool (pick best available)
+├── TRY #1: IPv6 Rotation (18 quintillion IPs if /64 subnet available)
+├── TRY #2: IPv4 Rotation (round-robin if multiple IPs)
+└── TRY #3: Header-Only (no IP change)
+
+LAYER E: Persona Rotation                      ← Always ON
+└── 4 independent browser identities (Chrome/Firefox/Safari)
+    Each: own cookies + own IP + own TLS fingerprint
+
+CIRCUIT BREAKER: 5 failures → 2 min block → auto-recover
+```
+
+### 18.2 curl_cffi Impersonation Targets
+
+```python
+_PERSONAS = ["chrome120", "chrome124", "firefox126", "safari17_0", "edge99"]
+```
+
+### 18.3 Google Persona Cookie Management
+
+- `GooglePersonaManager` harvests `NID`, `SOCS`, `CONSENT` cookies via headless Playwright
+- Cookies stored in Redis: `gf:persona:cookies` (4h TTL, well within NID's 6-month lifetime)
+- Multiple independent personas (one per TLS fingerprint) — Google sees different "users"
+- On CAPTCHA detection: cookies invalidated, background refresh triggered
+
+### 18.4 IPv6 Rotation
+
+If server has IPv6 /64 subnet: generate random 64-bit suffix per request. libcurl binds outbound connection to that address via `CURLOPT_INTERFACE`. Falls back to IPv4 multi-IP or header-only.
+
+### 18.5 NSE-Specific Anti-Ban (Session Race Condition Fix)
+
+**Problem**: When NSE cookies expire, all 4+ worker processes simultaneously hit the homepage, triggering Akamai bot detection.
+
+**Fix**: Redis distributed lock on `lock:nse_session`:
+```python
+async with redis.lock("lock:nse_session", timeout=10):
+    if not cache.exists("nse:cookies"):
+        cookies = await fetch_new_session()
+        cache.set("nse:cookies", cookies, ex=300)
+```
+
+---
+
+## 19. Known Bugs & Fixes Log
+
+### 19.1 Active Known Bugs (Not Yet Fixed)
+
+| # | Bug | Severity | Files | Fix |
+|---|-----|----------|-------|-----|
+| A | **FinBERT formula wrong** — `score * 2 - 1` treats 3-class model as binary | 🔴 High | `news_sentiment.py`, `macro_news_scorer.py`, `news.py`, `signals.py` | Change to `P(positive) - P(negative)` |
+| B | **`datetime.utcnow()` used in 15+ places** — day-boundary queries wrong in IST context | 🔴 High | `backfill.py`, `intraday_signal_generator.py`, `signals.py`, `yfinance_adapter.py`, etc. | Replace with `datetime.now(_IST)` where `_IST = timezone(timedelta(hours=5, minutes=30))` |
+| C | **NSE session race condition** — local threading.Lock invisible to Celery workers | 🟡 Medium | `nse_india_adapter.py` | Redis distributed lock |
+| D | **Realised P&L denominator** — net cash flow, not MTM | 🟡 Medium | `live_trade_service.py` | True Mark-to-Market with PriceService LTP |
+
+### 19.2 Fixed Bugs (Applied via BUGFIXES, April 2026)
+
+| # | Bug | Fix Applied |
+|---|-----|-------------|
+| 1 | Portfolio value used `SUM(price * filled_qty)` for all orders | ✅ Now uses BUY-minus-SELL net cash (L143–158 in `live_trade_service.py`) |
+| 2 | `datetime.utcnow()` in task_utils, signal_generator, signal_outcome_evaluation | ✅ Changed to `datetime.now(_IST)` |
+| 3 | Dead `_fetch_via_angel_one()` in `intraday_ingest.py` — O(N) logins | ✅ Removed |
+| 4 | Celery intraday schedule fired at 15:30–15:59 (post-NSE close) | ✅ Split into 9:00–14:59 + 15:00,15:15 entries |
+| 5 | Win-rate denominator counted unevaluated signals | ✅ Now uses `buy_evaluated_count` (only `is_evaluated=True` rows) |
+| 6 | No notifications when signal hits target/stop-loss | ✅ `_send_outcome_notifications()` fires on first `False→True` transition |
+| 7 | LightGBM trained with `sentiment_score=0.0` always | ✅ `_fetch_sentiment_history()` now supplies real historical scores |
+| 8 | Redis macro cache bypassed — yfinance called 48×/day | ✅ Inline Redis cache added with 1h TTL |
+| 9 | PatchTST dead code — TFT always used | ✅ PatchTST tried first; TFT is fallback |
+| 10 | Missing standalone `signal_ts` index on `signal_outcomes` | ✅ Migration `0008_add_signal_ts_index.py` added |
+
+### 19.3 Deferred Known Issues
+
+| # | Issue | Reason Deferred |
+|---|-------|-----------------|
+| D1 | Survivorship bias in LightGBM training | Requires delisted-stock data procurement |
+| D2 | `enable_utc=False` in Celery config | Changing requires rewriting all beat schedules to UTC |
+| D3 | No NSE market holiday calendar | Requires NSE holiday API or static calendar |
+| D4 | Forecast page blank for missing model | Frontend UX improvement |
+| D5 | Win-rate shows no sample count | Frontend display enhancement |
+| D6 | Signal analytics has no date range selector | Frontend feature request |
+
+---
+
+## 20. Roadmap
+
+### Phase I: Secure-System (Financial Safety & Anti-Ban) — Next Sprint
+
+| Task | Files | Impact |
+|------|-------|--------|
+| Fix FinBERT polarity formula | `news_sentiment.py`, `macro_news_scorer.py`, `news.py`, `signals.py` | Removes bearish bias from all sentiment |
+| Unify all timestamps to IST | 15+ files | Fixes day-boundary signal/data join errors |
+| Redis distributed lock for NSE session | `nse_india_adapter.py` | Prevents IP ban on session expiry |
+
+### Phase II: High-Fidelity Data (Sentiment & Signal Quality)
+
+| Task | Files | Impact |
+|------|-------|--------|
+| News deduplication (SHA256 + Redis SET) | `news_sentiment.py` | Removes 10× artificial sentiment spikes |
+| Fundamentals service (PE, ROE, D/E) | New `fundamentals_service.py`, `fundamentals_ingest.py` | Adds quality gate to BUY signals |
+| Signal freshness metadata in API | `signals.py`, `ForecastModal.tsx` | Users see signal age; staleness warnings |
+| On-demand signal refresh endpoint | `signals.py` API, `ForecastModal.tsx` | `POST /signals/{symbol}/refresh` |
+| NSE PDF analysis for earnings | New `pdf_extractor.py`, `pdf_summariser.py` | Richer FinBERT input on earnings days |
+
+### Phase III: Intelligent-Ensemble (ML & Learning Loop) — Long-term
+
+| Task | Files | Impact |
+|------|-------|--------|
+| Outcome-based ARF training (5-day forward return) | `river_amf.py`, `signal_generator.py` | ARF becomes a "corrector", not a copier |
+| Forecast RMSE accuracy leaderboard | New migration + `forecasts.py` | Enables model A/B testing |
+| True MTM portfolio valuation | `live_trade_service.py` | Correct circuit breaker denominator |
+
+### Future (Post-Phase III)
+
+- NSE PDF corporate announcement analysis (infrastructure ready, ~4.5h effort)
+- Survivorship-bias-free LightGBM training (requires delisted stock data)
+- NSE market holiday calendar integration
+- Full signal analytics date-range selector (frontend)
+

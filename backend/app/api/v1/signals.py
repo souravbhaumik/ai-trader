@@ -1,4 +1,4 @@
-﻿"""Signals API — AI-generated trading signals (Phase 3 fills the data).
+"""Signals API — AI-generated trading signals (Phase 3 fills the data).
 
 Phase 2: returns empty list with metadata so the frontend can display
 the correct empty state and broker info.
@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Annotated, Optional
 import csv
 import io
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -24,6 +24,9 @@ from app.models.user_settings import UserSettings
 logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/signals", tags=["signals"])
+
+# IST timezone constant
+_IST = timezone(timedelta(hours=5, minutes=30))
 
 
 @router.get("")
@@ -221,7 +224,7 @@ async def export_signal_outcomes_csv(
     period_days: int = Query(30, ge=1, le=365),
 ):
     """Export raw signal_outcomes rows as a CSV download."""
-    cutoff = datetime.utcnow() - timedelta(days=period_days)
+    cutoff = datetime.now(_IST) - timedelta(days=period_days)
 
     result = await session.execute(
         text("""
@@ -298,7 +301,7 @@ async def export_signal_outcomes_csv(
         ])
 
     output.seek(0)
-    filename = f"signal_outcomes_{period_days}d_{datetime.utcnow().strftime('%Y%m%d')}.csv"
+    filename = f"signal_outcomes_{period_days}d_{datetime.now(_IST).strftime('%Y%m%d')}.csv"
     return StreamingResponse(
         iter([output.getvalue()]),
         media_type="text/csv",
@@ -388,7 +391,7 @@ async def refresh_signal(
                 now_utc = datetime.now(tz=timezone.utc)
                 total_w, w_sum = 0.0, 0.0
                 for result in scores:
-                    polarity = result.score * 2 - 1
+                    polarity = result.score - result.neg_score  # P(pos) - P(neg)
                     weight   = result.confidence
                     w_sum   += polarity * weight
                     total_w += weight
@@ -477,11 +480,10 @@ async def refresh_signal(
             target = tech["target_price"]
             sl     = tech["stop_loss"]
 
-            from datetime import datetime as _dt
-            import uuid as _uuid2, json as _json2
-
+            from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+            _IST_inner = _tz(timedelta(hours=5, minutes=30))
             sig_id = _uuid2.uuid4()
-            now_ts = _dt.utcnow()
+            now_ts = _dt.now(_IST_inner)
             with _gsync() as db:
                 db.execute(
                     text("UPDATE signals SET is_active = FALSE WHERE symbol = :s AND is_active = TRUE"),

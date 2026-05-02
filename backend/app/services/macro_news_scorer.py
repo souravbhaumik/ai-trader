@@ -79,7 +79,10 @@ def score_macro_headlines(headlines: list[str]) -> float:
         weighted_sum  = 0.0
         total_weight  = 0.0
         for result in results:
-            polarity = result.score * 2 - 1          # [0,1] → [-1,1]
+            # Correct 3-class polarity: P(positive) - P(negative)
+            # The old `score * 2 - 1` formula treated it as binary and was
+            # biased bearish for neutral headlines (P≈0.33 → polarity = −0.34).
+            polarity = result.score - result.neg_score   # range: [−1, +1]
             weight   = result.confidence
             weighted_sum  += polarity * weight
             total_weight  += weight

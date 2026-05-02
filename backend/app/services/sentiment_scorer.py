@@ -1,4 +1,4 @@
-﻿"""FinBERT sentiment scorer — Phase 4.
+"""FinBERT sentiment scorer — Phase 4.
 
 Loads ``ProsusAI/finbert`` once per worker process (lazy, thread-safe) and
 scores batches of financial headlines. The model is kept on CPU by default;
@@ -31,6 +31,7 @@ class SentimentResult(NamedTuple):
     sentiment:  str    # 'positive' | 'negative' | 'neutral'
     score:      float  # positive-class probability
     confidence: float  # max-class probability
+    neg_score:  float  # negative-class probability (for correct polarity: pos - neg)
 
 
 # ── Lazy-loaded pipeline ──────────────────────────────────────────────────────
@@ -92,7 +93,7 @@ def _score_one(text: str, pipe) -> SentimentResult:
     to its token count × its winning confidence.
     """
     if not text or not text.strip():
-        return SentimentResult("neutral", 0.33, 0.33)
+        return SentimentResult("neutral", 0.33, 0.33, 0.33)
 
     tokenizer = pipe.tokenizer
     ids = tokenizer.encode(text, add_special_tokens=False)
@@ -105,7 +106,7 @@ def _score_one(text: str, pipe) -> SentimentResult:
         neg = lm.get("negative", 0.0)
         neu = lm.get("neutral",  0.0)
         best = max(lm, key=lm.get)  # type: ignore[arg-type]
-        return SentimentResult(best, round(pos, 4), round(max(pos, neg, neu), 4))
+        return SentimentResult(best, round(pos, 4), round(max(pos, neg, neu), 4), round(neg, 4))
 
     # Sliding-window chunking
     effective_len = _MAX_LENGTH - 2   # leave room for [CLS] and [SEP]
@@ -134,7 +135,7 @@ def _score_one(text: str, pipe) -> SentimentResult:
         total_weight += weight
 
     if total_weight == 0:
-        return SentimentResult("neutral", 0.33, 0.33)
+        return SentimentResult("neutral", 0.33, 0.33, 0.33)
 
     for label in agg:
         agg[label] /= total_weight
@@ -144,6 +145,7 @@ def _score_one(text: str, pipe) -> SentimentResult:
         sentiment  = best_label,
         score      = round(agg["positive"], 4),
         confidence = round(agg[best_label], 4),
+        neg_score  = round(agg["negative"], 4),
     )
 
 
@@ -155,7 +157,7 @@ def score_headlines(headlines: list[str]) -> list[SentimentResult]:
     batch pass. Longer texts are handled via sliding-window chunking.
     """
     pipe = _get_pipeline()
-    neutral_fallback = SentimentResult("neutral", 0.33, 0.33)
+    neutral_fallback = SentimentResult("neutral", 0.33, 0.33, 0.33)
 
     if not pipe or not headlines:
         return [neutral_fallback] * len(headlines)
@@ -191,7 +193,7 @@ def score_headlines(headlines: list[str]) -> list[SentimentResult]:
                 neg = lm.get("negative", 0.0)
                 neu = lm.get("neutral", 0.0)
                 best = max(lm, key=lm.get)  # type: ignore[arg-type]
-                results[idx] = SentimentResult(best, round(pos, 4), round(max(pos, neg, neu), 4))
+                results[idx] = SentimentResult(best, round(pos, 4), round(max(pos, neg, neu), 4), round(neg, 4))
 
         # Score long texts individually via chunking
         for idx in long_indices:

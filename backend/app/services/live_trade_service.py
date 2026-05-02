@@ -1,4 +1,4 @@
-﻿"""Live trading service — Angel One order management.
+"""Live trading service — Angel One order management.
 
 Handles placing and tracking REAL orders via the Angel One SmartAPI.
 Only executes when the user's trading_mode = 'live'.
@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from typing import Optional
 
@@ -24,13 +24,17 @@ from app.brokers.base import OrderResult
 
 logger = logging.getLogger(__name__)
 
-# NSE market hours (IST converted to naive UTC offsets)
+# NSE market hours (IST)
 _MARKET_OPEN_IST  = (9, 15)   # 09:15 IST
 _MARKET_CLOSE_IST = (15, 30)  # 15:30 IST
 
+# IST timezone constant
+_IST = timezone(timedelta(hours=5, minutes=30))
+
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    """Return current IST-aware datetime for DB timestamp fields."""
+    return datetime.now(_IST)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────

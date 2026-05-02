@@ -1,4 +1,4 @@
-﻿"""Historical OHLCV backfill via NSE Bhavcopy.
+"""Historical OHLCV backfill via NSE Bhavcopy.
 
 Iterates over calendar dates from (today - days) to yesterday, fetches the
 official NSE Bhavcopy CSV for each trading day, and bulk-upserts all EQ-series
@@ -21,7 +21,7 @@ from __future__ import annotations
 import io
 import json
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import structlog
 from sqlalchemy import text
@@ -36,6 +36,10 @@ from app.tasks.task_utils import (
 )
 
 logger = structlog.get_logger(__name__)
+
+# IST timezone constant — all market-context timestamps use IST
+_IST = timezone(timedelta(hours=5, minutes=30))
+
 
 _PROGRESS_KEY = "backfill:progress"
 _TASK_NAME    = "backfill"
@@ -73,7 +77,7 @@ def _set_progress(r, pct: int, message: str, status: str = "running") -> None:
             "pct": pct,
             "message": message,
             "status": status,
-            "ts": datetime.utcnow().isoformat(),
+            "ts": datetime.now(_IST).isoformat(),
         }),
     )
     # Mirror to task_utils so the View Logs modal shows live output
@@ -161,7 +165,7 @@ def backfill_universe(self, period: str = "2y", force: bool = False):
 
     days = _PERIOD_DAYS.get(period, 730)
 
-    today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    today = datetime.now(_IST).replace(hour=0, minute=0, second=0, microsecond=0)
     # Start from `days` ago; don't request today (Bhavcopy only available after ~6 PM IST)
     start_date = today - timedelta(days=days)
     end_date   = today - timedelta(days=1)

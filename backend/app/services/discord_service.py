@@ -1,4 +1,4 @@
-﻿"""Discord webhook service — Phase 2 / Phase 9.
+"""Discord webhook service — Phase 2 / Phase 9.
 
 Sends rich embed alerts to a Discord channel when new signals are generated.
 The webhook URL is optional; if ``DISCORD_WEBHOOK_URL`` is not set in the
@@ -15,10 +15,14 @@ import urllib.request
 import json
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# IST timezone — used for timing labels and embed timestamps
+_IST = timezone(timedelta(hours=5, minutes=30))
+
 
 _COLOR = {"BUY": 0x2ECC71, "SELL": 0xE74C3C}   # green / red
 
@@ -69,8 +73,8 @@ def notify_signal_sync(
     if signal_id:
         trade_url += f"&signal_id={signal_id}"
     
-    # Determine timing context
-    now = datetime.now()
+    # Determine timing context using IST hour
+    now = datetime.now(_IST)
     hour = now.hour
     if hour < 9:
         timing = "🌅 Pre-Market Signal"
@@ -97,7 +101,7 @@ def notify_signal_sync(
                     {"name": "Strategy",    "value": "AI Ensemble",               "inline": True},
                 ],
                 "footer": {"text": f"AI Trader · Signal #{signal_id[:8] if signal_id else 'N/A'}"},
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(_IST).isoformat(),
             }
         ]
     }

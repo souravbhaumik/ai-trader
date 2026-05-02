@@ -149,7 +149,8 @@ def _send_outcome_notifications(
         f"Entry: ₹{entry_price:,.2f} → {event}: {price_str}"
     )
 
-    # Discord (best-effort)
+    # Discord (best-effort) — reuse notify_signal_sync without the outcome-only message
+    # (extra_message kwarg does not exist in discord_service — removed to prevent TypeError)
     try:
         from app.services.discord_service import notify_signal_sync  # noqa: PLC0415
         notify_signal_sync(
@@ -157,9 +158,8 @@ def _send_outcome_notifications(
             signal_type=signal_type,
             confidence=0.0,          # not applicable for outcome alert
             entry=entry_price,
-            target=target_price,
-            sl=stop_loss,
-            extra_message=msg,
+            target=target_price or 0.0,
+            sl=stop_loss or 0.0,
         )
     except Exception as exc:
         logger.warning("outcome_notification.discord_failed", err=str(exc))
@@ -215,7 +215,16 @@ def evaluate_signal_outcomes() -> str:
             
             for signal in signals:
                 signals_processed += 1
-                signal_date = signal.ts.replace(hour=0, minute=0, second=0, microsecond=0)
+                # Normalize to IST midnight — handles both tz-aware and naive ts from DB
+                if signal.ts.tzinfo is not None:
+                    signal_date = signal.ts.astimezone(_IST).replace(
+                        hour=0, minute=0, second=0, microsecond=0
+                    )
+                else:
+                    # Assume UTC if naive, convert to IST
+                    signal_date = signal.ts.replace(tzinfo=timezone.utc).astimezone(_IST).replace(
+                        hour=0, minute=0, second=0, microsecond=0
+                    )
                 days_since = (today - signal_date).days
                 
                 if days_since < 1:

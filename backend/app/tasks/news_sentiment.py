@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import math
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any
@@ -28,11 +29,16 @@ from sqlalchemy import text
 from app.core.database import get_sync_session
 from app.tasks.celery_app import celery_app
 
+# IST timezone constant — all market-context timestamps use IST
+_IST = timezone(timedelta(hours=5, minutes=30))
+
 logger = structlog.get_logger(__name__)
 
 _SENTIMENT_KEY_PREFIX = "sentiment:"
 _SENTIMENT_TTL_SECS   = 50400  # 14 hours — survives overnight; 4:45 PM → still valid at 8:30 AM
 _ROLLING_WINDOW_HOURS = 24
+_DEDUP_KEY            = "news:dedup:seen"  # Redis SET of SHA256 hashes
+_DEDUP_TTL            = 86400              # 24h — matches rolling sentiment window
 
 
 @celery_app.task(
@@ -315,8 +321,17 @@ def _update_sentiment_cache(rows: list[dict], now_utc: datetime) -> None:
                 age_hours = max((now_utc - pub).total_seconds() / 3600, 0)
                 decay     = math.exp(-age_hours / 12)     # half-life ~12 hours
                 weight    = row["confidence"] * decay
-                # sentiment score: positive→1, neutral→0, negative→-1 mapping
-                polarity  = row["score"] * 2 - 1          # [0,1] → [-1,1]
+                # Correct 3-class polarity using sentiment label.
+                # The old `score * 2 - 1` formula was biased bearish for
+                # neutral articles (P≈0.33 → polarity ≈ −0.34).
+                # DB rows store label + positive score; derive sign from label.
+                sentiment_label = row.get("sentiment", "neutral")
+                if sentiment_label == "positive":
+                    polarity = row["score"]    # e.g. 0.87
+                elif sentiment_label == "negative":
+                    polarity = -row["score"]   # e.g. −0.82
+                else:
+                    polarity = 0.0             # neutral → no contribution
                 weighted_sum  += polarity * weight
                 total_weight  += weight
 

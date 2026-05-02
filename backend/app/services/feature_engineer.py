@@ -1,4 +1,4 @@
-﻿"""Feature engineering service — Phase 3.
+"""Feature engineering service — Phase 3.
 
 Builds a flat feature vector per symbol from:
   - OHLCV technical indicators  (RSI, MACD, Bollinger, ATR, OBV, ADX)
@@ -250,7 +250,17 @@ def build_features(
     }
 
     valid = sum(1 for v in feats.values() if not math.isnan(v))
-    logger.debug("feature_engineer.built", symbol=symbol, valid_features=valid, total=len(feats))
+    if valid < len(feats):
+        nan_keys = [k for k, v in feats.items() if math.isnan(v)]
+        logger.debug(
+            "feature_engineer.nan_features_replaced",
+            symbol=symbol, nan_keys=nan_keys, valid=valid, total=len(feats),
+        )
+        # Replace NaN with 0.0 — LightGBM handles missing via mean imputation
+        # but only if trained with use_missing=True; safest to coerce here.
+        feats = {k: (0.0 if math.isnan(v) else v) for k, v in feats.items()}
+    else:
+        logger.debug("feature_engineer.built", symbol=symbol, valid_features=valid, total=len(feats))
     return feats
 
 

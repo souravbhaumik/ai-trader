@@ -36,6 +36,9 @@ from app.tasks.task_utils import (
 logger = structlog.get_logger(__name__)
 _TASK = "intraday_signal_generator"
 
+# IST timezone constant — all market-context timestamps use IST
+_IST = timezone(timedelta(hours=5, minutes=30))
+
 # ── Tunables (same as EOD generator) ──────────────────────────────────────────
 _LOOKBACK       = 90
 _MIN_BARS       = 28
@@ -149,9 +152,9 @@ def _score_symbol(closes: List[float]) -> Optional[Dict]:
 
 def _build_intraday_bar(session, symbol: str) -> Optional[dict]:
     """Aggregate today's 15-min candles into one bar. Returns None if no data."""
-    today_start_ist = (
-        datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
-    ).replace(hour=9, minute=0, second=0, microsecond=0)
+    # Build today's 09:00 IST boundary, then convert to UTC for the DB query
+    # (ohlcv_intraday.ts is stored in UTC)
+    today_start_ist = datetime.now(_IST).replace(hour=9, minute=0, second=0, microsecond=0)
     today_start_utc = today_start_ist.astimezone(timezone.utc).replace(tzinfo=None)
 
     row = session.execute(
@@ -220,9 +223,9 @@ def generate_intraday_signals():
         inserted = 0
         skipped  = 0
         no_intraday = 0
-        now_ts   = datetime.utcnow()
+        now_ts   = datetime.now(_IST)   # IST-aware timestamp for signal records
 
-        append_task_log(_TASK, f"Loaded {total} symbols. Time: {now_ts.strftime('%H:%M UTC')}")
+        append_task_log(_TASK, f"Loaded {total} symbols. Time: {now_ts.strftime('%H:%M IST')}")
 
         for idx in range(0, total, _BATCH_SIZE):
             batch = symbols[idx: idx + _BATCH_SIZE]

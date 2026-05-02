@@ -279,12 +279,141 @@ Monitor at http://localhost:5555 (Flower)
 
 ## Documentation
 
-| Document                                 | Description                              |
-| ---------------------------------------- | ---------------------------------------- |
-| [DESIGN.md](DESIGN.md)                   | System architecture and technical design |
-| [GETTING_STARTED.md](GETTING_STARTED.md) | Detailed setup and configuration guide   |
-| [API.md](API.md)                         | Complete API reference                   |
-| [DATABASE.md](DATABASE.md)               | Database schema documentation            |
+| Document               | Description                              |
+| ---------------------- | ---------------------------------------- |
+| [DESIGN.md](DESIGN.md) | System architecture, pipeline design, roadmap & bug log |
+| [API.md](API.md)       | Complete API reference                   |
+| [DATABASE.md](DATABASE.md) | Database schema documentation        |
+
+---
+
+## Detailed Setup Guide
+
+### Prerequisites
+
+| Software | Version | Purpose |
+| --- | --- | --- |
+| Docker | 20.10+ | Containerization |
+| Docker Compose | 2.0+ | Service orchestration |
+| Git | 2.30+ | Version control |
+
+**System requirements**: 4 GB RAM minimum (8 GB recommended), 10 GB storage.
+
+### Environment Configuration
+
+Edit `.env` after copying from `.env.example`:
+
+**Security keys** (generate once):
+```bash
+python3 -c "import secrets; print('JWT_SECRET_KEY=' + secrets.token_hex(32))"
+python3 -c "from cryptography.fernet import Fernet; print('FERNET_KEY=' + Fernet.generate_key().decode())"
+python3 -c "import secrets; print('INVITE_SIGNING_KEY=' + secrets.token_hex(16))"
+```
+
+**Required `.env` entries:**
+```bash
+DB_USER=aitrader
+DB_PASSWORD=<strong_password>
+DB_NAME=aitrader
+REDIS_PASSWORD=<strong_password>
+JWT_SECRET_KEY=<64_char_hex>
+FERNET_KEY=<base64_fernet_key>
+INVITE_SIGNING_KEY=<32_byte_hex>
+ALLOWED_ORIGINS=http://localhost:3000
+FRONTEND_URL=http://localhost:3000
+ENVIRONMENT=development
+```
+
+### Broker Configuration
+
+#### Angel One (Primary broker + live trading)
+
+1. Sign up at https://www.angelone.in/ and complete KYC
+2. Create API app at https://smartapi.angelone.in/
+3. Enable TOTP in the Angel One app → Settings → TOTP → note the base32 secret
+
+```bash
+ANGEL_API_KEY=your_api_key
+ANGEL_CLIENT_ID=your_client_id
+ANGEL_MPIN=your_4digit_pin
+ANGEL_TOTP_SECRET=your_totp_base32
+```
+
+#### Upstox (Intraday candle fallback)
+
+1. Create API app at https://account.upstox.com/developer/apps
+2. Set **Redirect URI**: `http://localhost:8000/api/v1/broker-credentials/upstox/callback`
+
+```bash
+UPSTOX_API_KEY=your_api_key
+UPSTOX_API_SECRET=your_api_secret
+UPSTOX_REDIRECT_URI=http://localhost:8000/api/v1/broker-credentials/upstox/callback
+```
+
+One-time OAuth: call `GET /api/v1/broker-credentials/upstox/authorize`, open the returned URL in a browser, log in. Token auto-stored. Expires midnight IST; system notifies at 7:30 AM if re-auth needed.
+
+### Initial Setup
+
+```bash
+# 1. Start all services
+docker compose up -d
+
+# 2. Verify all containers running
+docker compose ps
+
+# 3. Create admin user
+docker compose exec backend python scripts/seed_admin_user.py
+# Default: admin@aitrader.local / admin123 — CHANGE IMMEDIATELY
+
+# 4. Populate stock universe (Admin → Pipeline → Populate Universe, or:)
+docker compose exec backend python scripts/populate_universe.py
+```
+
+### ML Model Setup
+
+Ensure ≥200 days of OHLCV data, then train LightGBM:
+
+```bash
+# Via Admin UI: Admin → Pipeline → Train Model
+# Or via CLI:
+docker compose exec celery-worker celery -A app.tasks.celery_app call app.tasks.ml_training.train_model
+```
+
+For deep learning models (LSTM/TFT) trained on Google Colab:
+```bash
+LSTM_GDRIVE_ID=your_lstm_file_id
+TFT_GDRIVE_ID=your_tft_file_id
+# Then: Admin → Models → Download from Drive
+```
+
+LLM signal explainability:
+```bash
+EXPLAINABILITY_BACKEND=groq   # groq|gemini|local|disabled
+GROQ_API_KEY=your_groq_api_key
+```
+
+### Notification Setup
+
+```bash
+# Discord
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/xxx/yyy
+
+# Email (Gmail App Password — not account password)
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=your.email@gmail.com
+SMTP_PASSWORD=your_app_password
+SMTP_FROM=AI Trader <your.email@gmail.com>
+```
+
+### IP Rotation (Optional — for rate limit bypass)
+
+```bash
+IP_ROTATOR_BACKEND=proxy_list
+IP_ROTATOR_STRATEGY=round_robin  # or random
+IP_ROTATOR_PROXY_LIST="socks5://user:pass@proxy1.example.com:1080
+http://user:pass@proxy2.example.com:8080"
+```
 
 ---
 
@@ -331,29 +460,124 @@ npm test
 
 ## Production Deployment
 
+### Security Checklist
+
+- [ ] Change all default passwords (DB, Redis, admin user)
+- [ ] Use strong, unique secrets for JWT/Fernet/Invite keys
+- [ ] Enable HTTPS via Cloudflare Tunnel or reverse proxy
+- [ ] Set `ENVIRONMENT=production`
+- [ ] Update `ALLOWED_ORIGINS` with production domain
+
 ### Cloudflare Tunnel Setup
 
 For stable webhook URLs (required for broker postbacks):
 
 ```bash
-# Install cloudflared
-# Configure tunnel to proxy to backend:8000
+# Install cloudflared (Linux)
+wget https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+sudo mv cloudflared-linux-amd64 /usr/local/bin/cloudflared && chmod +x /usr/local/bin/cloudflared
+
+# Authenticate and create tunnel
+cloudflared tunnel login
 cloudflared tunnel create ai-trader
-cloudflared tunnel route dns ai-trader your-domain.com
+
+# Configure (~/.cloudflared/config.yml)
+# tunnel: <tunnel-id>
+# ingress:
+#   - hostname: api.yourdomain.com
+#     service: http://localhost:8000
+#   - hostname: app.yourdomain.com
+#     service: http://localhost:3000
+#   - service: http_status:404
+
+cloudflared tunnel route dns ai-trader api.yourdomain.com
+cloudflared tunnel route dns ai-trader app.yourdomain.com
+cloudflared tunnel run ai-trader
 ```
 
-### Environment Adjustments
+### Production Environment Variables
 
 ```bash
 ENVIRONMENT=production
-ALLOWED_ORIGINS=https://your-domain.com
-FRONTEND_URL=https://your-domain.com
+ALLOWED_ORIGINS=https://app.yourdomain.com
+FRONTEND_URL=https://app.yourdomain.com
+RATE_LIMIT_DEFAULT=30/minute
+RATE_LIMIT_SCREENER=15/minute
+RATE_LIMIT_PRICES=60/minute
 ```
 
-### Docker Production
+### Register Broker Webhooks
+
+After Cloudflare Tunnel is running, register with brokers:
+- **Angel One Developer Portal** → postback URL: `https://api.yourdomain.com/api/v1/webhooks/broker/order-update`
+- **Upstox Developer Portal** → similar webhook registration
+
+---
+
+## Troubleshooting
+
+### Common Issues
+
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `connection refused to postgres:5432` | DB not ready | Wait or check `docker compose logs postgres` |
+| `NOAUTH Authentication required` (Redis) | Wrong Redis password | Check `REDIS_PASSWORD` in `.env` |
+| `kombu.exceptions.OperationalError` (Celery) | Redis not running | `docker compose logs redis` |
+| `Network Error / CORS` (frontend) | Backend unreachable | Verify `ALLOWED_ORIGINS` includes frontend URL |
+| `Invalid credentials or TOTP` (broker) | Wrong creds or clock skew | Verify base32 TOTP secret; sync system clock |
+
+### Log Commands
 
 ```bash
-docker compose -f docker-compose.prod.yml up -d
+docker compose logs -f                        # all services
+docker compose logs -f --timestamps backend   # backend with timestamps
+docker compose logs --tail=100 celery-worker  # last 100 lines of worker
+```
+
+### Service Management
+
+```bash
+docker compose restart backend          # restart single service
+docker compose down && docker compose up -d --build  # full rebuild
+```
+
+### Database Operations
+
+```bash
+# Connect to PostgreSQL
+docker compose exec postgres psql -U aitrader -d aitrader
+
+# Run migrations manually
+docker compose exec backend alembic upgrade head
+
+# Reset database (CAUTION: destroys all data)
+docker compose down -v && docker compose up -d
+```
+
+### Cache Management
+
+```bash
+# Flush all Redis keys (CAUTION)
+docker compose exec redis redis-cli -a $REDIS_PASSWORD FLUSHALL
+
+# Clear specific pattern
+docker compose exec redis redis-cli -a $REDIS_PASSWORD KEYS "screener*" | xargs redis-cli -a $REDIS_PASSWORD DEL
+```
+
+### Verify Data Pipeline
+
+```bash
+# Check OHLCV data in DB
+docker compose exec postgres psql -U aitrader -d aitrader -c \
+  "SELECT symbol, COUNT(*) FROM ohlcv_daily GROUP BY symbol ORDER BY COUNT(*) DESC LIMIT 10;"
+
+# Check Redis sentiment cache
+docker compose exec redis redis-cli -a $REDIS_PASSWORD KEYS "sentiment:*" | wc -l
+# Expected: >50 keys if news task ran successfully
+
+# Trigger news task manually
+docker compose exec celery-worker celery -A app.tasks.celery_app call \
+  app.tasks.news_sentiment.fetch_news_sentiment
 ```
 
 ---

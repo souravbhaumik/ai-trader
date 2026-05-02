@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Dict, List, Optional
 
@@ -17,6 +17,10 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
+
+# IST timezone constant — all cutoff queries use IST to match NSE trading days
+_IST = timezone(timedelta(hours=5, minutes=30))
+
 
 
 @dataclass
@@ -78,7 +82,7 @@ async def get_signal_performance_metrics(
     period_days: int = 30,
 ) -> SignalPerformanceMetrics:
     """Get aggregated signal performance metrics for the specified period."""
-    cutoff_date = datetime.now() - timedelta(days=period_days)
+    cutoff_date = datetime.now(_IST) - timedelta(days=period_days)
     
     # Main aggregation query
     result = await db.execute(
@@ -236,7 +240,7 @@ async def get_performance_by_sector(
     period_days: int = 30,
 ) -> List[Dict]:
     """Get signal performance broken down by sector."""
-    cutoff_date = datetime.now() - timedelta(days=period_days)
+    cutoff_date = datetime.now(_IST) - timedelta(days=period_days)
     
     result = await db.execute(
         text("""
@@ -273,7 +277,7 @@ async def get_daily_performance_trend(
     period_days: int = 30,
 ) -> List[Dict]:
     """Get daily signal performance trend for charting."""
-    cutoff_date = datetime.now() - timedelta(days=period_days)
+    cutoff_date = datetime.now(_IST) - timedelta(days=period_days)
     
     result = await db.execute(
         text("""

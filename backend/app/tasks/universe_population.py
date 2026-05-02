@@ -1,4 +1,4 @@
-﻿"""Universe population Celery task.
+"""Universe population Celery task.
 
 Downloads the NSE equity master list and Nifty index constituents, then
 upserts the full stock_universe table.
@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import csv
 import io
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 import structlog
 from sqlalchemy import text
@@ -25,6 +25,10 @@ from app.tasks.celery_app import celery_app
 from app.tasks.task_utils import clear_task_logs, now_iso, write_task_status
 
 logger = structlog.get_logger(__name__)
+
+# IST timezone constant — updated_at timestamps reflect IST
+_IST = timezone(timedelta(hours=5, minutes=30))
+
 
 _TASK_NAME = "universe_population"
 
@@ -216,7 +220,7 @@ def populate_universe(nifty500_only: bool = False) -> dict:
                         "industry": industry,
                         "in50":     in50,
                         "in500":    in500,
-                        "now":      datetime.utcnow(),
+                        "now":      datetime.now(_IST),
                     },
                 )
                 if result.rowcount > 0:

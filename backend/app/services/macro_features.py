@@ -14,12 +14,16 @@ Cached in Redis for 1 hour to avoid repeated API calls.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional
 
 import structlog
 
 logger = structlog.get_logger(__name__)
+
+# IST timezone constant
+_IST = timezone(timedelta(hours=5, minutes=30))
+
 
 _CACHE_KEY = "macro:features"
 _CACHE_TTL = 3600  # 1 hour
@@ -81,7 +85,7 @@ async def _fetch_from_yfinance() -> Dict[str, float]:
 
         def _download():
             result = {}
-            end = datetime.now()
+            end = datetime.now(_IST)
             start = end - timedelta(days=30)
 
             try:

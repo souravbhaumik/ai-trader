@@ -1,4 +1,4 @@
-﻿"""News sentiment API — Phase 4.
+"""News sentiment API — Phase 4.
 
 Endpoints
 ---------
@@ -76,7 +76,15 @@ def _score_from_db(rows) -> AggregatedSentiment | None:
         age_hours = max((now_utc - pub).total_seconds() / 3600, 0)
         decay     = math.exp(-age_hours / 12)
         weight    = row[4] * decay   # confidence * decay
-        polarity  = row[3] * 2 - 1  # score [0,1] → [-1,1]
+        # Correct 3-class polarity: use sentiment label, not score*2-1
+        # row[3]=score (positive prob), row[6]=sentiment label
+        sentiment_label = row[6] if len(row) > 6 else "neutral"
+        if sentiment_label == "positive":
+            polarity = row[3]    # e.g. 0.85
+        elif sentiment_label == "negative":
+            polarity = -row[3]   # e.g. -0.80
+        else:
+            polarity = 0.0       # neutral → no directional contribution
         weighted_sum  += polarity * weight
         total_weight  += weight
         count += 1
@@ -122,7 +130,7 @@ async def get_sentiment(
     cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=24)
     rows = (await session.execute(
         text("""
-            SELECT symbol, headline, source, score, confidence, published_at
+            SELECT symbol, headline, source, score, confidence, published_at, sentiment
             FROM   news_sentiment
             WHERE  symbol = :sym AND published_at >= :cutoff
             ORDER  BY published_at DESC
@@ -243,7 +251,8 @@ async def live_analysis(
     weighted = 0.0
     for sr in scores:
         w = sr.confidence
-        weighted += (sr.score * 2 - 1) * w
+        # Correct 3-class polarity: P(positive) - P(negative)
+        weighted += (sr.score - sr.neg_score) * w
         total_w += w
     agg = round(weighted / total_w, 4) if total_w else 0.0
 

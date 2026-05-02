@@ -23,9 +23,10 @@ Endpoints:
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 
 import structlog
@@ -37,7 +38,17 @@ logger = structlog.get_logger(__name__)
 
 _TIMEOUT = 12
 _BASE    = "https://www.nseindia.com"
-_SESSION_TTL = 300  # refresh NSE session cookies every 5 minutes
+_SESSION_TTL = 270  # refresh every 4.5 min; kept under 5-min NSE session window
+
+# ── Redis-backed distributed cookie store ─────────────────────────────────────
+# All Celery workers share one set of NSE session cookies via Redis.
+# Key holds a JSON-encoded cookie dict; TTL mirrors _SESSION_TTL so it expires
+# together with the actual NSE session.
+_COOKIE_REDIS_KEY = "nse:session:cookies"
+_COOKIE_REDIS_TTL = _SESSION_TTL           # seconds
+_LOCK_KEY         = "lock:nse_session"     # distributed mutex
+_LOCK_TIMEOUT     = 15                     # seconds to hold the lock
+_LOCK_BLOCKING    = 18                     # seconds to wait for the lock
 
 _HEADERS = {
     "User-Agent": (
@@ -138,19 +149,19 @@ class NSEIndiaAdapter(BrokerAdapter):
     Uses curl_cffi to impersonate Chrome's full TLS fingerprint, which is
     required to pass Akamai's bot management on nseindia.com.
 
-    Session management:
+    Session management (distributed):
       Cookies (nsit, nseappid, ak_bmsc) are obtained by hitting the NSE
-      homepage and are reused for up to 5 minutes before a silent refresh.
+      homepage once per _SESSION_TTL seconds.  The cookie dict is stored in
+      Redis so all Celery workers share one session instead of each hitting
+      the NSE homepage independently.  A Redis distributed lock prevents
+      multiple workers from refreshing simultaneously.
     """
 
     broker_name = "nse_india"
 
-    # Class-level session state — shared across all instances so only one
-    # homepage hit occurs every _SESSION_TTL seconds regardless of how many
-    # adapter instances exist (price_service singleton, ws.py, tests, etc.)
-    _cookies:    dict  = {}
-    _session_ts: float = 0.0
-    _session_lock = threading.Lock()
+    # Class-level local cookie cache — populated from Redis on fast path so
+    # there is no Redis round-trip on every individual request.
+    _cookies: dict = {}
 
     def __init__(self) -> None:
         pass  # session state is class-level
@@ -162,16 +173,72 @@ class NSEIndiaAdapter(BrokerAdapter):
     # ── Session ───────────────────────────────────────────────────────────────
 
     async def _ensure_session(self, session: AsyncSession) -> None:
-        """Warm up NSE session cookies by hitting the homepage if stale."""
-        if time.monotonic() - NSEIndiaAdapter._session_ts < _SESSION_TTL and NSEIndiaAdapter._cookies:
-            return
+        """Warm up NSE session cookies — distributed-lock-protected.
+
+        Cookies are stored in Redis so all Celery workers share one set.
+        A Redis distributed lock prevents concurrent homepage hits when the
+        cookie cache is cold, eliminating the race condition that caused
+        multiple workers to simultaneously flood the NSE homepage.
+
+        Fast path  (cookies in Redis, not expired): no lock acquired — O(1).
+        Slow path  (cache miss): acquires lock, double-checks, then fetches.
+        """
+        import redis as _redis
+        from app.core.config import settings
+
+        r = _redis.from_url(settings.redis_url, decode_responses=True)
         try:
-            r = await session.get(_BASE, headers=_HEADERS, timeout=_TIMEOUT)
-            NSEIndiaAdapter._cookies    = dict(r.cookies)
-            NSEIndiaAdapter._session_ts = time.monotonic()
-            logger.debug("nse_session_refreshed", cookie_keys=list(NSEIndiaAdapter._cookies.keys()))
-        except Exception as exc:
-            logger.warning("nse_session_refresh_failed", err=str(exc))
+            # ── Fast path: cookies already in Redis ───────────────────────────────
+            cached = r.get(_COOKIE_REDIS_KEY)
+            if cached:
+                try:
+                    NSEIndiaAdapter._cookies = json.loads(cached)
+                    return
+                except Exception:
+                    pass  # corrupt cache — fall through to slow path
+
+            # ── Slow path: acquire distributed lock, fetch once, share via Redis ──
+            try:
+                with r.lock(
+                    _LOCK_KEY,
+                    timeout=_LOCK_TIMEOUT,
+                    blocking_timeout=_LOCK_BLOCKING,
+                ):
+                    # Double-check inside lock (another worker may have just refreshed)
+                    cached = r.get(_COOKIE_REDIS_KEY)
+                    if cached:
+                        try:
+                            NSEIndiaAdapter._cookies = json.loads(cached)
+                            return
+                        except Exception:
+                            pass
+
+                    # Genuinely need a fresh session — hit the NSE homepage
+                    try:
+                        resp = await session.get(_BASE, headers=_HEADERS, timeout=_TIMEOUT)
+                        NSEIndiaAdapter._cookies = dict(resp.cookies)
+                        r.setex(
+                            _COOKIE_REDIS_KEY,
+                            _COOKIE_REDIS_TTL,
+                            json.dumps(NSEIndiaAdapter._cookies),
+                        )
+                        logger.info(
+                            "nse_session_refreshed",
+                            cookie_keys=list(NSEIndiaAdapter._cookies.keys()),
+                        )
+                    except Exception as exc:
+                        logger.warning("nse_session_refresh_failed", err=str(exc))
+            except Exception as lock_exc:
+                # Lock timeout or Redis unavailable — fall back to a best-effort fetch
+                logger.warning("nse_session_lock_failed", err=str(lock_exc))
+                if not NSEIndiaAdapter._cookies:
+                    try:
+                        resp = await session.get(_BASE, headers=_HEADERS, timeout=_TIMEOUT)
+                        NSEIndiaAdapter._cookies = dict(resp.cookies)
+                    except Exception as exc:
+                        logger.warning("nse_session_fallback_failed", err=str(exc))
+        finally:
+            r.close()  # always return connection to pool
 
     async def _get_json(self, session: AsyncSession, path: str):
         """GET an NSE API endpoint, auto-refreshing the session on 401/403."""

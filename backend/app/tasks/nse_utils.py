@@ -167,7 +167,9 @@ def download_sec_bhav_csv(trade_date: datetime, timeout: int = 30) -> Optional[D
 
 def try_sec_bhav_with_lookback(max_lookback_days: int = 5) -> Optional[Dict[str, dict]]:
     """Try sec_bhav for today, then walk back up to max_lookback_days trading days."""
-    today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    from datetime import timezone, timedelta
+    _IST = timezone(timedelta(hours=5, minutes=30))
+    today = datetime.now(_IST).replace(hour=0, minute=0, second=0, microsecond=0)
     for delta in range(max_lookback_days):
         candidate = today - timedelta(days=delta)
         if candidate.weekday() >= 5:  # skip weekends

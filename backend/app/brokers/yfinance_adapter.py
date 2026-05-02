@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 import structlog
@@ -29,6 +29,10 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 from app.brokers.base import BrokerAdapter, OHLCVBar, Quote
 
 logger = structlog.get_logger(__name__)
+
+# IST timezone — quote timestamps use IST wall-clock
+_IST = timezone(timedelta(hours=5, minutes=30))
+
 
 # ── Circuit breaker state (module-level, shared across adapter instances) ─────
 _CB_LOCK            = threading.Lock()
@@ -149,7 +153,7 @@ class YFinanceAdapter(BrokerAdapter):
                 high=self._safe_float(info.day_high),
                 low=self._safe_float(info.day_low),
                 open=self._safe_float(info.open),
-                timestamp=datetime.utcnow().isoformat(),
+                timestamp=datetime.now(_IST).isoformat(),
             )
         except Exception as e:
             _record_failure()
@@ -191,7 +195,7 @@ class YFinanceAdapter(BrokerAdapter):
                     high=self._safe_float(fi.day_high) or price,
                     low=self._safe_float(fi.day_low) or price,
                     open=self._safe_float(fi.open) or price,
-                    timestamp=datetime.utcnow().isoformat(),
+                    timestamp=datetime.now(_IST).isoformat(),
                 )
             except Exception as e:
                 logger.debug("yfinance_batch_ticker_error", ticker=ticker, err=str(e))
@@ -271,7 +275,7 @@ class YFinanceAdapter(BrokerAdapter):
                     high=self._safe_float(info.day_high),
                     low=self._safe_float(info.day_low),
                     open=self._safe_float(info.open),
-                    timestamp=datetime.utcnow().isoformat(),
+                    timestamp=datetime.now(_IST).isoformat(),
                 )
                 quotes.append(q)
             except Exception as e:
