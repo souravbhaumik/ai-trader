@@ -8,17 +8,20 @@ fingerprint so Akamai's bot management accepts the request.
 Data characteristics:
   - Live prices: ~15-30s behind NSE NEAT matching engine
   - Full OHLCV: open, high, low, last price, previous close, volume
-  - Coverage:   all Nifty 50 in a single bulk call; non-Nifty via individual calls
+  - Coverage:   Nifty 50, Next 50, Midcap 100 in 3 concurrent bulk calls;
+                any remaining symbols via individual calls
   - Indices:    Nifty 50, Bank Nifty, IT, Pharma, Auto, Next 50
 
 Rate:
-  One bulk call every 30s (Redis TTL) serves all concurrent users.
-  Individual calls for non-Nifty symbols: polite 200ms spacing.
+  Three concurrent bulk calls every 30s (Redis TTL) cover ~200 symbols
+  in < 2 seconds. Individual calls for remaining symbols: polite 200ms spacing.
 
 Endpoints:
-  /api/equity-stockIndices?index=NIFTY%2050  → all Nifty 50 stocks in 1 call
-  /api/allIndices                            → all major index quotes
-  /api/quote-equity?symbol=RELIANCE         → single stock deep quote
+  /api/equity-stockIndices?index=NIFTY%2050           → all Nifty 50
+  /api/equity-stockIndices?index=NIFTY%20NEXT%2050    → all Nifty Next 50
+  /api/equity-stockIndices?index=NIFTY%20MIDCAP%20100 → all Nifty Midcap 100
+  /api/allIndices                                      → all major index quotes
+  /api/quote-equity?symbol=RELIANCE                   → single stock deep quote
 """
 from __future__ import annotations
 
@@ -264,34 +267,75 @@ class NSEIndiaAdapter(BrokerAdapter):
     # ── BrokerAdapter interface ───────────────────────────────────────────────
 
     async def get_quotes_batch(self, symbols: List[str]) -> List[Quote]:
-        """Fetch live quotes — one bulk call covers all 50 Nifty stocks.
+        """Fetch live quotes using concurrent multi-index bulk calls.
 
-        Non-Nifty symbols fall through to individual /api/quote-equity calls
-        with a 200ms pause between them to stay within NSE's rate tolerance.
+        Strategy (3 parallel requests instead of N sequential ones):
+          1. Fire 3 asyncio tasks concurrently:
+               - NIFTY 50          (~50 symbols)
+               - NIFTY NEXT 50     (~50 symbols)
+               - NIFTY MIDCAP 100  (~100 symbols)
+          2. Merge all results into a single lookup map.
+          3. For any requested symbol still missing after the bulk pass,
+             fall back to /api/quote-equity (individual, with 200ms spacing).
+
+        This reduces snapshot time from ~40s (sequential individual calls)
+        to < 2s (3 parallel bulk calls), eliminating time-skew in indicators.
         """
         if _is_circuit_open():
             logger.info("nse_circuit_open_skipping_batch")
             return []
 
+        # The 3 index endpoints that together cover the full Nifty universe
+        _BULK_INDICES = [
+            "/api/equity-stockIndices?index=NIFTY%2050",
+            "/api/equity-stockIndices?index=NIFTY%20NEXT%2050",
+            "/api/equity-stockIndices?index=NIFTY%20MIDCAP%20100",
+        ]
+
         async with AsyncSession(impersonate="chrome124", timeout=_TIMEOUT) as session:
             await self._ensure_session(session)
 
-            # One call → all 50 Nifty stocks
-            data = await self._get_json(
-                session, "/api/equity-stockIndices?index=NIFTY%2050"
+            # ── Step 1: fire all 3 bulk index calls concurrently ──────────────────────
+            bulk_results = await asyncio.gather(
+                *[self._get_json(session, path) for path in _BULK_INDICES],
+                return_exceptions=True,
             )
-            if not data or "data" not in data:
+
+            # ── Step 2: merge all index responses into one symbol lookup map ─────────
+            nse_map: dict[str, dict] = {}
+            bulk_counts: list[int] = []
+            for idx_name, result in zip(_BULK_INDICES, bulk_results):
+                if isinstance(result, Exception) or not result or "data" not in result:
+                    logger.warning(
+                        "nse_bulk_index_failed",
+                        index=idx_name,
+                        err=str(result) if isinstance(result, Exception) else "empty",
+                    )
+                    bulk_counts.append(0)
+                    continue
+                count = 0
+                for item in result["data"]:
+                    sym = item.get("symbol", "").upper()
+                    if sym and sym not in nse_map:  # first-seen wins (avoids duplicates)
+                        nse_map[sym] = item
+                        count += 1
+                bulk_counts.append(count)
+
+            if not nse_map:
+                # All 3 bulk calls failed
                 _record_failure()
-                logger.warning("nse_bulk_fetch_failed")
+                logger.warning("nse_all_bulk_fetches_failed")
                 return []
 
-            # Build a lookup map from the bulk response
-            nse_map: dict[str, dict] = {
-                item["symbol"].upper(): item
-                for item in data["data"]
-                if "symbol" in item
-            }
+            logger.info(
+                "nse_bulk_indices_fetched",
+                nifty50=bulk_counts[0] if len(bulk_counts) > 0 else 0,
+                next50=bulk_counts[1]  if len(bulk_counts) > 1 else 0,
+                midcap100=bulk_counts[2] if len(bulk_counts) > 2 else 0,
+                total_in_map=len(nse_map),
+            )
 
+            # ── Step 3: match requested symbols against the merged map ──────────────
             quotes: List[Quote] = []
             missing: List[str]  = []
 
@@ -302,12 +346,11 @@ class NSEIndiaAdapter(BrokerAdapter):
                 else:
                     missing.append(clean)
 
-            # Individual calls for symbols not in the Nifty 50 bulk response
+            # ── Step 4: individual fallback for symbols not in any bulk index ────────
             for sym in missing:
                 item = await self._get_json(session, f"/api/quote-equity?symbol={sym}")
                 if item and "priceInfo" in item:
                     d = item["priceInfo"]
-                    # lastPrice lives at priceInfo level
                     d.setdefault("lastPrice", item.get("lastPrice"))
                     quotes.append(_make_quote(sym, d))
                 else:
@@ -315,11 +358,14 @@ class NSEIndiaAdapter(BrokerAdapter):
                 await asyncio.sleep(0.2)  # polite spacing for individual calls
 
             _record_success()
+            n_bulk       = len(quotes) - len([s for s in missing if s in {q.symbol for q in quotes}])
+            n_individual = len(missing)
             logger.info(
                 "nse_batch_complete",
                 total=len(quotes),
-                bulk=len(quotes) - len([s for s in missing if s in {q.symbol for q in quotes}]),
-                individual=len(missing),
+                bulk=n_bulk,
+                individual=n_individual,
+                missing=len(missing) - (len(quotes) - n_bulk),
             )
             return quotes
 
