@@ -16,7 +16,7 @@ AI Trader is a full-stack automated trading system for NSE/BSE markets. It combi
 
 ### 📊 Market Data
 
-- **Real-time quotes** via Angel One and Upstox APIs
+- **Real-time quotes** via NSE India unofficial API (3 concurrent bulk index calls — Nifty 50, Next 50, Midcap 100)
 - **Historical OHLCV** data with TimescaleDB compression
 - **Intraday 15-min candles** in `ohlcv_intraday` (5-day rolling, Angel One → Upstox hybrid)
 - **NSE Bhavcopy** daily ingest for EOD data
@@ -26,10 +26,11 @@ AI Trader is a full-stack automated trading system for NSE/BSE markets. It combi
 
 - **LightGBM classifier** for BUY/SELL signal generation
 - **Technical indicators**: RSI, MACD, Bollinger Bands, ATR, OBV, ADX
-- **Intraday signals** at 9:30 AM, 11:00 AM, and 1:00 PM using live 15-min candles
+- **Intraday signals** every 15 min during market hours using live 15-min candles
 - **LSTM autoencoder** for market anomaly detection
-- **TFT Transformer** for 5-day price forecasting
-- **FinBERT** sentiment analysis on financial news
+- **PatchTST Transformer** for 5-day price forecasting (TFT as fallback)
+- **Forecast self-evaluation**: RMSE/MAE/directional accuracy tracked in `forecast_history`
+- **FinBERT** sentiment analysis with zero-centred polarity scoring (P(pos) − P(neg))
 
 ### 📰 News & Sentiment
 
@@ -265,13 +266,23 @@ Full API documentation: http://localhost:8000/docs
 
 ## Scheduled Tasks
 
-| Task              | Schedule                   | Purpose                 |
-| ----------------- | -------------------------- | ----------------------- |
-| Bhavcopy Ingest   | 7:30 PM IST Mon-Fri        | NSE EOD data            |
-| Signal Generation | 4:45 PM IST Mon-Fri        | ML signal generation    |
-| News Sentiment    | Every 15 min, 9 AM-3:45 PM | News scoring            |
-| Model Training    | Saturday 2:00 AM           | Weekly LightGBM retrain |
-| Broker Reconnect  | 8:00 AM IST Mon-Fri        | Session refresh         |
+| Task | Schedule | Purpose |
+| --- | --- | --- |
+| Bhavcopy Ingest | 7:30 PM IST Mon–Fri | NSE EOD data |
+| EOD Ingest | 4:30 PM IST Mon–Fri | EOD summary (Angel One / NSE) |
+| Pre-market Signals | 8:30 AM IST Mon–Fri | ML signal generation |
+| Post-market Signals | 4:45 PM IST Mon–Fri | EOD signal generation |
+| Intraday OHLCV | Every 15 min, 9:15–15:30 IST | Hybrid candle ingest |
+| Intraday Signals | Every 15 min, 9:30–15:15 IST | Live intraday signals |
+| News Sentiment | Every 15 min, 9 AM–3:45 PM | FinBERT scoring |
+| Breaking News | Every 2 min, 9 AM–4 PM | Fast-path news scanner |
+| Forecast Persist | 4:00 PM IST Mon–Fri | Save PatchTST/TFT forecasts to DB |
+| Forecast Evaluate | 6:30 AM IST Mon–Fri | Compute RMSE/MAE on matured forecasts |
+| Signal Outcomes | 5:00 PM IST Mon–Fri | EOD signal accuracy evaluation |
+| Model Training | Saturday 2:00 AM | Weekly LightGBM retrain |
+| Broker Reconnect | 8:00 AM IST Mon–Fri | Angel One / Upstox session refresh |
+| Macro Pulse | Every 30 min, 9 AM–4 PM | Macro regime detection |
+| EOD Reconciliation | 4:00 PM IST Mon–Fri | Live order sync from broker |
 
 Monitor at http://localhost:5555 (Flower)
 

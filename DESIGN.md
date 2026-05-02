@@ -51,7 +51,7 @@ AI Trader is a full-stack algorithmic trading platform for Indian equity markets
 
 - **NSE**: National Stock Exchange of India (primary)
 - **BSE**: Bombay Stock Exchange (secondary)
-- **Indices**: Nifty 50, Sensex, Bank Nifty, Nifty IT, Nifty Pharma, Nifty Auto
+- **NSE Coverage**: 3 concurrent bulk index calls (Nifty 50, Next 50, Midcap 100) via `equity-stockIndices` — snapshot time < 2s vs ~40s sequential
 
 ---
 
@@ -152,12 +152,13 @@ AI Trader is a full-stack algorithmic trading platform for Indian equity markets
 
 | Component               | Technology             | Purpose                                     |
 | ----------------------- | ---------------------- | ------------------------------------------- |
-| **Signal Model**        | LightGBM               | Binary classifier for BUY/SELL signals      |
-| **Anomaly Detection**   | LSTM Autoencoder       | Reconstruction-error based anomaly scoring  |
-| **Price Forecasting**   | TFT (Transformer)      | 5-day ahead price prediction                |
-| **Sentiment Analysis**  | FinBERT                | Financial news sentiment scoring            |
-| **NER**                 | spaCy (en_core_web_sm) | Entity extraction for news → symbol mapping |
-| **Experiment Tracking** | MLflow                 | Model versioning and metrics                |
+| **Signal Model** | LightGBM | Binary classifier for BUY/SELL signals |
+| **Anomaly Detection** | LSTM Autoencoder | Reconstruction-error based anomaly scoring |
+| **Price Forecasting** | PatchTST (primary) / TFT (fallback) | 5-day ahead price prediction |
+| **Forecast Evaluation** | RMSE / MAE / Directional Accuracy | Self-evaluation tracked in `forecast_history` |
+| **Sentiment Analysis** | FinBERT | Zero-centred polarity: P(pos) − P(neg) |
+| **NER** | spaCy (en_core_web_sm) | Entity extraction for news → symbol mapping |
+| **Experiment Tracking** | MLflow | Model versioning and metrics |
 
 ### 3.4 Frontend
 
@@ -648,23 +649,26 @@ Axios-based with interceptors:
 
 ### 12.1 Celery Beat Schedule
 
-| Task                                                  | Schedule                      | Description                                       |
-| ----------------------------------------------------- | ----------------------------- | ------------------------------------------------- |
-| `bhavcopy.ingest_bhavcopy`                            | 7:30 PM IST Mon-Fri           | NSE Bhavcopy EOD ingest                           |
-| `eod_ingest.ingest_eod`                               | 4:30 PM IST Mon-Fri           | EOD summary ingest                                |
-| `signal_generator.generate_signals`                   | 8:30 AM IST Mon-Fri           | Pre-market signal generation                      |
-| `signal_generator.generate_signals`                   | 4:45 PM IST Mon-Fri           | Post-market EOD signal generation                 |
-| `intraday_ingest.ingest_intraday`                     | Every 15 min, 9:15 AM–3:30 PM | Hybrid intraday OHLCV ingest (Angel One → Upstox) |
-| `intraday_signal_generator.generate_intraday_signals` | 9:30 AM IST Mon-Fri           | Intraday signal — opening bar                     |
-| `intraday_signal_generator.generate_intraday_signals` | 11:00 AM IST Mon-Fri          | Intraday signal — morning trend                   |
-| `intraday_signal_generator.generate_intraday_signals` | 1:00 PM IST Mon-Fri           | Intraday signal — half-day trend                  |
-| `upstox_token_refresh.check_upstox_tokens`            | 7:30 AM IST Mon-Fri           | Upstox token validity check + notification        |
-| `news_sentiment.fetch_news_sentiment`                 | Every 15 min, 9 AM-3:45 PM    | News + sentiment pipeline                         |
-| `ml_training.train_model`                             | Saturday 2:00 AM              | Weekly LightGBM retrain                           |
-| `eod_reconciliation.reconcile_live_orders`            | 4:00 PM IST Mon-Fri           | Live order sync                                   |
-| `macro_pulse.update_macro_regime`                     | Every 30 min, 9 AM-4 PM       | Macro regime detection                            |
-| `broker_reconnect.refresh_broker_sessions`            | 8:00 AM IST Mon-Fri           | Broker session refresh                            |
-| `signal_outcome_evaluation.evaluate_signal_outcomes`  | 5:00 PM IST Mon-Fri           | EOD signal outcome evaluation                     |
+| Task | Schedule | Description |
+| ---- | -------- | ----------- |
+| `bhavcopy.ingest_bhavcopy` | 7:30 PM IST Mon–Fri | NSE Bhavcopy EOD ingest |
+| `eod_ingest.ingest_eod` | 4:30 PM IST Mon–Fri | EOD summary ingest |
+| `signal_generator.generate_signals` | 8:30 AM IST Mon–Fri | Pre-market signal generation |
+| `signal_generator.generate_signals` | 4:45 PM IST Mon–Fri | Post-market EOD signal generation |
+| `intraday_ingest.ingest_intraday` | Every 15 min, 9:15–15:30 IST | Hybrid intraday OHLCV ingest (Angel One → Upstox) |
+| `intraday_signal_generator.generate_intraday_signals` | Every 15 min, 9:30–15:15 IST | Continuous intraday signals |
+| `upstox_token_refresh.check_upstox_tokens` | 7:30 AM IST Mon–Fri | Upstox token validity check + notification |
+| `news_sentiment.fetch_news_sentiment` | Every 15 min, 9 AM–3:45 PM | News + sentiment pipeline |
+| `news_sentiment.fetch_news_sentiment` | 8:20 AM IST Mon–Fri | Pre-signal warm-up |
+| `news_sentiment.fetch_news_sentiment` | 4:40 PM IST Mon–Fri | Post-market news run |
+| `breaking_news_scanner.scan_breaking_news` | Every 2 min, 9 AM–4 PM | Fast-path breaking news scanner |
+| `forecast_tasks.persist_daily_forecasts` | 4:00 PM IST Mon–Fri | Persist PatchTST/TFT forecasts to `forecast_history` |
+| `forecast_tasks.evaluate_forecast_accuracy` | 6:30 AM IST Mon–Fri | Compute RMSE/MAE/directional accuracy on matured forecasts |
+| `ml_training.train_model` | Saturday 2:00 AM | Weekly LightGBM retrain |
+| `eod_reconciliation.reconcile_live_orders` | 4:00 PM IST Mon–Fri | Live order sync |
+| `macro_pulse.update_macro_regime` | Every 30 min, 9 AM–4 PM | Macro regime detection |
+| `broker_reconnect.refresh_broker_sessions` | 8:00 AM IST Mon–Fri | Broker session refresh |
+| `signal_outcome_evaluation.evaluate_signal_outcomes` | 5:00 PM IST Mon–Fri | EOD signal outcome evaluation |
 
 ### 12.2 Task Monitoring
 
@@ -772,11 +776,15 @@ FRONTEND_URL=http://localhost:3000
 
 ### 14.2 TimescaleDB Hypertables
 
-| Table            | Partition | Compression   | Purpose                |
-| ---------------- | --------- | ------------- | ---------------------- |
-| `ohlcv_daily`    | 7 days    | After 30 days | Daily OHLCV bars       |
-| `signals`        | 7 days    | After 30 days | AI trading signals     |
-| `news_sentiment` | 7 days    | After 14 days | News articles + scores |
+| Table | Partition | Compression | Purpose |
+| ----- | --------- | ----------- | ------- |
+| `ohlcv_daily` | 7 days | After 90 days | Daily OHLCV bars |
+| `ohlcv_intraday` | 1 day | After 7 days | 15-min intraday bars |
+| `signals` | 7 days | After 30 days | AI trading signals |
+| `signal_outcomes` | 7 days | After 30 days | Signal P&L evaluation |
+| `news_sentiment` | 1 day | After 14 days | News articles + FinBERT scores |
+| `model_predictions` | 7 days | After 30 days | Raw model probability outputs |
+| `forecast_history` | 3 months | None | PatchTST/TFT forecasts + RMSE/MAE metrics |
 
 ### 14.3 Indexes
 

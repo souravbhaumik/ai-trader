@@ -55,7 +55,7 @@ All UUIDs use `gen_random_uuid()`. All timestamps are `TIMESTAMPTZ` (UTC stored,
 | **User Management** | users, user_settings, user_invites, refresh_tokens | Regular PostgreSQL |
 | **Trading** | paper_trades, live_orders, broker_credentials | Regular PostgreSQL |
 | **Market Data** | ohlcv_daily, ohlcv_1min, stock_universe | TimescaleDB hypertables (OHLCV) |
-| **ML/AI** | signals, ml_models, model_predictions, news_sentiment | TimescaleDB hypertables |
+| **ML/AI** | signals, ml_models, model_predictions, news_sentiment, forecast_history | TimescaleDB hypertables |
 | **Infrastructure** | expo_push_tokens, pipeline_task_status | Regular PostgreSQL |
 
 ### Storage Estimates
@@ -66,6 +66,7 @@ All UUIDs use `gen_random_uuid()`. All timestamps are `TIMESTAMPTZ` (UTC stored,
 | `ohlcv_1min` | ~900,000 | 7 days | 90 days |
 | `signals` | ~500 | None | Indefinite |
 | `news_sentiment` | ~1,000 | 14 days | 180 days |
+| `forecast_history` | ~200 | None | Indefinite |
 
 ---
 
@@ -607,7 +608,45 @@ SELECT create_hypertable(
 
 ---
 
-## 5. Indexes
+### 4.6 `forecast_history`
+
+Persisted 5-day price forecasts from PatchTST / TFT with actuals backfilled for self-evaluation.
+One row per `(symbol, model_version, forecast_date)` — fully idempotent.
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | `UUID` | PK DEFAULT `gen_random_uuid()` | |
+| `symbol` | `VARCHAR(32)` | NOT NULL | NSE symbol (no suffix) |
+| `model_version` | `VARCHAR(64)` | NOT NULL | Model version string |
+| `model_type` | `VARCHAR(16)` | NOT NULL DEFAULT `'patchtst'` | `patchtst` \| `tft` |
+| `forecast_date` | `DATE` | NOT NULL | Date forecast was generated |
+| `base_price` | `NUMERIC(12,4)` | NOT NULL | Closing price used as base |
+| `horizon_days` | `INTEGER` | NOT NULL DEFAULT `5` | Forecast window in trading days |
+| `predicted_prices` | `JSONB` | NOT NULL | Array of predicted closes, e.g. `[2510.0, 2540.0, ...]` |
+| `actual_prices` | `JSONB` | | Backfilled actual closes after horizon expires |
+| `rmse` | `NUMERIC(12,4)` | | Root Mean Squared Error |
+| `mae` | `NUMERIC(12,4)` | | Mean Absolute Error |
+| `directional_acc` | `NUMERIC(5,4)` | | Fraction of correct direction calls [0–1] |
+| `is_evaluated` | `BOOLEAN` | NOT NULL DEFAULT `FALSE` | `TRUE` after actuals filled and metrics computed |
+| `created_at` | `TIMESTAMPTZ` | NOT NULL DEFAULT `NOW()` | |
+
+**TimescaleDB Configuration**:
+```sql
+SELECT create_hypertable(
+    'forecast_history', 'forecast_date',
+    chunk_time_interval => INTERVAL '3 months'
+);
+```
+
+**Constraints**:
+- `UNIQUE (symbol, model_version, forecast_date)` — idempotent upsert via `ON CONFLICT DO NOTHING`
+
+**Indexes**:
+- `idx_fh_symbol_date` ON `(symbol, forecast_date DESC)`
+- `idx_fh_unevaluated` ON `(is_evaluated, forecast_date)` WHERE `NOT is_evaluated`
+- `idx_fh_model_version` ON `(model_version, forecast_date DESC)`
+
+---
 
 ### Complete Index Reference
 
@@ -791,19 +830,24 @@ cat backup.dump | docker compose exec -i postgres pg_restore -U aitrader -d aitr
 ## Appendix: Alembic Migrations
 
 | Revision | Description |
-|----------|-------------|
-| `0001` | Initial schema — all tables, hypertables, indexes, triggers |
-| `0002` | Add audit columns (created_at, updated_at, tbl_last_dt) |
-| `0003` | Add explanation column to signals |
-| `0004` | Add dedup_hash to news_sentiment, live_orders broker_order_id index |
-| `0005` | Phase 8: pool_eligible flag, expo_push_tokens table |
+|----------|-----------|
+| `0001_initial` | Initial schema — all tables, hypertables, indexes, triggers |
+| `0002_audit_cols` | Add audit columns (created_at, updated_at, tbl_last_dt) |
+| `0003_signal_explanation` | Add explanation column to signals |
+| `0004_dedup_and_indexes` | Add dedup_hash to news_sentiment; live_orders broker_order_id index |
+| `0005_pool_and_expo` | pool_eligible flag, expo_push_tokens table |
+| `0006_signal_outcomes` | signal_outcomes hypertable for EOD P&L evaluation |
+| `0007_intraday_and_upstox_oauth` | ohlcv_intraday hypertable; Upstox OAuth token fields |
+| `0008_add_signal_ts_index` | Standalone signal_ts index on signal_outcomes |
+| `0009_signals_unique_constraint` | UNIQUE (symbol, ts, signal_type) on signals for intraday upserts |
+| `0010_forecast_history` | forecast_history TimescaleDB hypertable for PatchTST/TFT self-evaluation |
 
 Run migrations:
 ```bash
-docker compose exec backend alembic upgrade head
+docker compose exec -e PYTHONPATH=/app backend alembic upgrade head
 ```
 
 Check current revision:
 ```bash
-docker compose exec backend alembic current
+docker compose exec -e PYTHONPATH=/app backend alembic current
 ```

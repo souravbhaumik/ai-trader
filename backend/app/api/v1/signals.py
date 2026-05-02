@@ -8,6 +8,8 @@ from __future__ import annotations
 from typing import Annotated, Optional
 import csv
 import io
+import json as _json
+import uuid as _uuid
 from datetime import datetime, timedelta, timezone
 
 import structlog
@@ -480,9 +482,9 @@ async def refresh_signal(
             target = tech["target_price"]
             sl     = tech["stop_loss"]
 
-            from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+            from datetime import datetime as _dt, timezone as _tz
             _IST_inner = _tz(timedelta(hours=5, minutes=30))
-            sig_id = _uuid2.uuid4()
+            sig_id = _uuid.uuid4()
             now_ts = _dt.now(_IST_inner)
             with _gsync() as db:
                 db.execute(
@@ -510,7 +512,7 @@ async def refresh_signal(
                         "target":     target,
                         "sl":         sl,
                         "mv":         model_ver,
-                        "feat":       _json2.dumps(features),
+                        "feat":       _json.dumps(features),
                         "created_at": now_ts,
                     },
                 )

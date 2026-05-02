@@ -9,6 +9,9 @@ Redis keys written:
 """
 from __future__ import annotations
 
+import asyncio
+import json
+
 import structlog
 
 from app.tasks.celery_app import celery_app

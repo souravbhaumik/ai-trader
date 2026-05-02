@@ -1,6 +1,6 @@
 # AI Trader — API Contract
 
-> **Status**: Pre-implementation design reference  
+> **Status**: Implemented & live
 > All endpoints are versioned under `/api/v1/`. Base URL in production: `https://<your-cloudflare-domain>/api/v1/`
 
 ---
@@ -23,6 +23,7 @@
 14. [Admin Endpoints](#14-admin-endpoints)
 15. [Webhooks (Broker Postback)](#15-webhooks-broker-postback)
 16. [Mobile — Push Tokens](#16-mobile--push-tokens)
+17. [Forecasts](#17-forecasts)
 
 ---
 
@@ -1237,3 +1238,71 @@ Deregister all push tokens for the current user (called on logout from mobile).
 ```json
 { "success": true, "data": { "deregistered": 1 } }
 ```
+
+---
+
+## 17. Forecasts
+
+### `GET /forecasts/{symbol}`
+
+Returns a 5-day PatchTST price forecast (falls back to TFT if PatchTST model not loaded).
+
+> **Side effect**: Automatically persists the forecast into `forecast_history` via a background thread so accuracy can be tracked over time. Uses `ON CONFLICT DO NOTHING` — idempotent.
+
+**Response** `200`
+```json
+{
+  "symbol": "RELIANCE",
+  "base_price": 2510.50,
+  "forecast": [2525.0, 2538.0, 2551.0, 2560.0, 2572.0],
+  "model_version": "patchtst_v2.1",
+  "confidence_intervals": [[2500.0, 2550.0], [2510.0, 2566.0]]
+}
+```
+
+**Failure** `422` — fewer than 82 bars of history available  
+**Failure** `503` — no model loaded (neither PatchTST nor TFT)
+
+---
+
+### `GET /forecasts/{symbol}/history`
+
+Returns the last N forecast records with RMSE / MAE / directional accuracy for model self-evaluation.
+
+**Query params**
+| Param | Default | Description |
+|-------|---------|-------------|
+| `limit` | `30` | Max rows to return (capped at 100) |
+
+**Response** `200`
+```json
+[
+  {
+    "symbol": "RELIANCE",
+    "forecast_date": "2026-05-01",
+    "model_version": "patchtst_v2.1",
+    "model_type": "patchtst",
+    "base_price": 2510.50,
+    "horizon_days": 5,
+    "predicted_prices": [2525.0, 2538.0, 2551.0, 2560.0, 2572.0],
+    "actual_prices": [2518.0, 2530.0, 2545.0, 2558.0, 2562.0],
+    "rmse": 12.3,
+    "mae": 9.8,
+    "directional_acc": 0.8,
+    "is_evaluated": true
+  }
+]
+```
+
+- `actual_prices` / `rmse` / `mae` / `directional_acc` are `null` for forecasts whose 5-day horizon has not yet passed
+- `is_evaluated` becomes `true` once the morning `evaluate_forecast_accuracy` task runs (06:30 IST)
+
+---
+
+### Forecast Automation
+
+| Task | Time | Purpose |
+|------|------|---------|
+| `forecast_tasks.persist_daily_forecasts` | 16:00 IST Mon–Fri | Saves forecasts for all active symbols after EOD bar confirmed |
+| `forecast_tasks.evaluate_forecast_accuracy` | 06:30 IST Mon–Fri | Backfills actuals, computes RMSE/MAE/directional accuracy |
+
