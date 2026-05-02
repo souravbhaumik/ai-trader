@@ -12,12 +12,19 @@ from __future__ import annotations
 
 import json
 import math
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 import numpy as np
 import structlog
 
 logger = structlog.get_logger(__name__)
+
+# IST timezone constant — used for market-hours lookahead guard
+_IST = timezone(timedelta(hours=5, minutes=30))
+_MARKET_OPEN  = (9, 15)   # 09:15 IST
+_MARKET_CLOSE = (15, 30)  # 15:30 IST
+
 
 # ── Feature name constants (order matters for model compatibility) ─────────────
 FEATURE_NAMES: list[str] = [
@@ -273,21 +280,58 @@ async def build_features_for_symbol(
     """Convenience wrapper: fetch OHLCV from DB and sentiment from Redis,
     then call ``build_features``.
 
+    Lookahead bias guard (Issue 4):
+      During NSE market hours (09:15–15:30 IST Mon–Fri), today's OHLCV row
+      is partial — its close is the current live price, not the final EOD close.
+      Since the ML model was trained on EOD closes, using a partial bar would
+      introduce lookahead bias and cause indicator drift during the session.
+      The guard excludes today's row when called during market hours, so all
+      indicators are computed on the previous session's confirmed EOD close.
+
     Returns ``None`` if insufficient OHLCV history.
     """
     from sqlalchemy import text as _text
+    from datetime import time as _time
 
-    # ── 1. Fetch OHLCV ────────────────────────────────────────────────────────
-    rows = (await session.execute(
-        _text("""
-            SELECT ts, open, high, low, close, volume
-            FROM   ohlcv_daily
-            WHERE  symbol = :sym
-            ORDER  BY ts DESC
-            LIMIT  :lim
-        """),
-        {"sym": symbol, "lim": lookback_days},
-    )).fetchall()
+    # ── Detect market hours (Mon–Fri 09:15–15:30 IST) ─────────────────────────────
+    now_ist = datetime.now(_IST)
+    t = now_ist.time()
+    is_market_hours = (
+        now_ist.weekday() <= 4
+        and _time(*_MARKET_OPEN) <= t <= _time(*_MARKET_CLOSE)
+    )
+
+    # ── 1. Fetch OHLCV ───────────────────────────────────────────────────────────
+    # During market hours, exclude today's partial bar to avoid lookahead bias.
+    if is_market_hours:
+        today_midnight = now_ist.replace(hour=0, minute=0, second=0, microsecond=0)
+        rows = (await session.execute(
+            _text("""
+                SELECT ts, open, high, low, close, volume
+                FROM   ohlcv_daily
+                WHERE  symbol = :sym
+                  AND  ts < :today
+                ORDER  BY ts DESC
+                LIMIT  :lim
+            """),
+            {"sym": symbol, "lim": lookback_days, "today": today_midnight},
+        )).fetchall()
+        logger.debug(
+            "feature_engineer.market_hours_guard_active",
+            symbol=symbol,
+            excluded_date=today_midnight.date().isoformat(),
+        )
+    else:
+        rows = (await session.execute(
+            _text("""
+                SELECT ts, open, high, low, close, volume
+                FROM   ohlcv_daily
+                WHERE  symbol = :sym
+                ORDER  BY ts DESC
+                LIMIT  :lim
+            """),
+            {"sym": symbol, "lim": lookback_days},
+        )).fetchall()
 
     if len(rows) < 30:
         logger.debug("feature_engineer.insufficient_history", symbol=symbol, bars=len(rows))
@@ -300,7 +344,7 @@ async def build_features_for_symbol(
     lows    = [float(r[3]) for r in rows]
     volumes = [float(r[5]) for r in rows]
 
-    # ── 2. Fetch sentiment from Redis (Phase 4 cache) ─────────────────────────
+    # ── 2. Fetch sentiment from Redis (Phase 4 cache) ──────────────────────────────
     sentiment: Optional[float] = None
     try:
         raw = await redis_client.get(f"sentiment:{symbol}")
@@ -310,4 +354,10 @@ async def build_features_for_symbol(
     except Exception as exc:
         logger.warning("feature_engineer.sentiment_fetch_failed", symbol=symbol, err=str(exc))
 
-    return build_features(symbol, closes, highs, lows, volumes, sentiment)
+    feats = build_features(symbol, closes, highs, lows, volumes, sentiment)
+    if feats is not None and is_market_hours:
+        # Tag the result so callers know these are EOD-close-based features,
+        # not live intraday features — useful for signal confidence scoring.
+        feats["_live_market_hours"] = 1.0
+    return feats
+

@@ -1,4 +1,4 @@
-﻿"""Forecast API — Phase 5.
+"""Forecast API — Phase 5.
 
 Endpoints
 ---------
@@ -145,10 +145,22 @@ class DLModelRow(BaseModel):
     promoted_at:  Optional[str]
     metrics:      Any
 
+class ForecastAccuracyRow(BaseModel):
+    """Single row from forecast_history for self-evaluation display."""
+    symbol:          str
+    forecast_date:   str
+    model_version:   str
+    model_type:      str
+    base_price:      float
+    horizon_days:    int
+    predicted_prices: list[float]
+    actual_prices:   Optional[list[float]]
+    rmse:            Optional[float]
+    mae:             Optional[float]
+    directional_acc: Optional[float]
+    is_evaluated:    bool
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  Forecast endpoints
-# ══════════════════════════════════════════════════════════════════════════════
+
 
 @router.get("/forecasts/{symbol}", response_model=ForecastResponse)
 async def get_forecast(
@@ -159,6 +171,7 @@ async def get_forecast(
     """5-day ahead TFT price forecast for a symbol.
 
     Requires an active TFT model (see ``POST /admin/models/download-from-drive``).
+    Also persists the forecast result into forecast_history for self-evaluation.
     """
     user_id: str = str(user.id)
 
@@ -179,8 +192,10 @@ async def get_forecast(
     # PatchTST is the newer/more accurate forecaster; fall back to TFT when
     # the PatchTST model is not yet loaded (e.g. hasn't been downloaded yet).
     result = patchtst_forecast(symbol, bars)
+    model_type = "patchtst"
     if result is None:
         result = tft_forecast(symbol, bars)
+        model_type = "tft"
     if result is None:
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -189,8 +204,119 @@ async def get_forecast(
             "docker compose exec backend python scripts/download_models.py",
         )
 
+    # ── Persist to forecast_history (fire-and-forget, best-effort) ──────────────────
+    # This ensures forecasts are recorded even on non-trading days or when
+    # the beat task hasn't run yet.  We run it in a background thread so it
+    # never delays the API response.
+    try:
+        import json as _json
+        import threading
+        from datetime import datetime, timezone, timedelta
+        from datetime import date as _date
+
+        _IST = timezone(timedelta(hours=5, minutes=30))
+        today_ist: _date = datetime.now(_IST).date()
+        predicted_prices: list = result.get("forecast") or result.get("prices", [])
+        base_price_val: float  = result.get("base_price", bars[-1]["close"])
+        model_version_val: str = result.get("model_version", result.get("version", "unknown"))
+        horizon: int           = len(predicted_prices)
+        clean_symbol: str      = symbol.upper().split(".")[0]
+
+        def _persist_background():
+            try:
+                from app.core.database import get_sync_session as _gsess  # noqa: PLC0415
+                from sqlalchemy import text as _text                        # noqa: PLC0415
+                with _gsess() as _sess:
+                    _sess.execute(
+                        _text("""
+                            INSERT INTO forecast_history
+                                (symbol, model_version, model_type, forecast_date,
+                                 base_price, horizon_days, predicted_prices)
+                            VALUES
+                                (:sym, :ver, :mtype, :dt,
+                                 :base, :horizon, :prices::jsonb)
+                            ON CONFLICT (symbol, model_version, forecast_date)
+                            DO NOTHING
+                        """),
+                        {
+                            "sym":     clean_symbol,
+                            "ver":     model_version_val,
+                            "mtype":   model_type,
+                            "dt":      today_ist,
+                            "base":    round(base_price_val, 4),
+                            "horizon": horizon,
+                            "prices":  _json.dumps(predicted_prices),
+                        },
+                    )
+                    _sess.commit()
+            except Exception as _exc:
+                logger.warning("forecast_api.persist_failed", symbol=clean_symbol, err=str(_exc))
+
+        threading.Thread(target=_persist_background, daemon=True).start()
+
+    except Exception as exc:
+        logger.warning("forecast_api.persist_setup_failed", symbol=symbol, err=str(exc))
+
     return ForecastResponse(symbol=symbol.upper(), **result)
 
+
+@router.get("/forecasts/{symbol}/history", response_model=list[ForecastAccuracyRow])
+async def get_forecast_history(
+    symbol:  str,
+    limit:   int = 30,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Return recent forecast history with RMSE / MAE / directional accuracy.
+
+    Returns the last `limit` forecast rows for the symbol, newest first.
+    Evaluated rows have actual_prices + accuracy metrics filled in.
+    Un-evaluated rows (horizon not yet passed) show None for metrics.
+    """
+    clean = symbol.upper().split(".")[0]
+    rows = (
+        await session.execute(
+            text("""
+                SELECT symbol, forecast_date, model_version, model_type,
+                       base_price, horizon_days, predicted_prices, actual_prices,
+                       rmse, mae, directional_acc, is_evaluated
+                FROM   forecast_history
+                WHERE  symbol = :sym
+                ORDER  BY forecast_date DESC
+                LIMIT  :lim
+            """),
+            {"sym": clean, "lim": min(limit, 100)},
+        )
+    ).fetchall()
+
+    import json as _json
+    def _parse_prices(v) -> Optional[list[float]]:
+        if v is None:
+            return None
+        if isinstance(v, list):
+            return [float(x) for x in v]
+        try:
+            return [float(x) for x in _json.loads(v)]
+        except Exception:
+            return None
+
+    return [
+        ForecastAccuracyRow(
+            symbol          = r[0],
+            forecast_date   = str(r[1]),
+            model_version   = r[2],
+            model_type      = r[3],
+            base_price      = float(r[4]),
+            horizon_days    = int(r[5]),
+            predicted_prices= _parse_prices(r[6]) or [],
+            actual_prices   = _parse_prices(r[7]),
+            rmse            = float(r[8])  if r[8]  is not None else None,
+            mae             = float(r[9])  if r[9]  is not None else None,
+            directional_acc = float(r[10]) if r[10] is not None else None,
+            is_evaluated    = bool(r[11]),
+        )
+        for r in rows
+    ]
 
 @router.get("/forecasts/{symbol}/anomaly", response_model=AnomalyResponse)
 async def get_anomaly(

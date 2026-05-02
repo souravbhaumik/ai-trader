@@ -129,6 +129,20 @@ celery_app.conf.beat_schedule = {
         "task":     "app.tasks.eod_reconciliation.reconcile_live_orders",
         "schedule": crontab(hour=16, minute=0, day_of_week="1-5"),
     },
+    # ── Forecast persistence & self-evaluation ──────────────────────────────────
+    # Persist daily forecasts at 16:00 IST — 30 min after NSE close so the
+    # EOD bar for today is confirmed in ohlcv_daily before we record base_price.
+    "forecast-persist-daily": {
+        "task":     "app.tasks.forecast_tasks.persist_daily_forecasts",
+        "schedule": crontab(hour=16, minute=0, day_of_week="1-5"),
+    },
+    # Evaluate matured forecasts at 06:30 IST — before market open.
+    # Fills actual prices and computes RMSE / MAE / directional accuracy
+    # for any forecast whose full horizon (5 days) has passed.
+    "forecast-evaluate-daily": {
+        "task":     "app.tasks.forecast_tasks.evaluate_forecast_accuracy",
+        "schedule": crontab(hour=6, minute=30, day_of_week="1-5"),
+    },
     # Macro pulse — every 30 min during market hours
     "macro-pulse-pipeline": {
         "task":     "app.tasks.macro_pulse.update_macro_regime",

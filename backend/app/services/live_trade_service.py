@@ -93,78 +93,83 @@ async def _get_user_adapter(user_id: uuid.UUID, db: AsyncSession):
 async def _enforce_daily_loss_limit(user_id: uuid.UUID, db: AsyncSession) -> None:
     """Raise ValueError if the user has exceeded their daily loss limit.
 
-    Computes today's realised P&L from completed SELL orders:
-      loss = sum((price - avg_fill_price) * filled_qty)  for SELL orders
-    where a negative value means a net loss.
+    Fix 1 — P&L formula:
+      Day P&L = (SELL proceeds today) − (BUY costs today)
+      Both sides use avg_fill_price * qty — the actual traded value, not the
+      limit/order price. A negative result = net loss on the day.
 
-    If |loss| > daily_loss_limit_pct % of paper_balance, the user's
+    Fix 2 — MTM denominator:
+      Portfolio denominator = gross BUY capital ever deployed = SUM of all
+      COMPLETE BUY fill values. This never collapses to zero after withdrawals
+      or profitable exits, unlike the old "net BUY−SELL cash flow" figure.
+
+    If |day_loss| ≥ daily_loss_limit_pct % of gross_buy_capital,
     trading_mode is flipped to 'paper' and a ValueError is raised.
     """
-    from datetime import date  # noqa: PLC0415
+    # IST midnight — consistent with all other day-boundary logic
+    today_start = datetime.now(_IST).replace(hour=0, minute=0, second=0, microsecond=0)
 
-    # IST midnight = UTC midnight - 5h30m; use UTC date for simplicity (conservative)
-    today_start = datetime.combine(date.today(), datetime.min.time())
-
-    # Sum of (avg_fill_price - price) * filled_qty for completed SELL orders today.
-    # A positive result here means the user sold below their order price → loss.
-    result = await db.execute(
+    # ── Fix 1: correct day P&L ───────────────────────────────────────────────────────
+    # Net cash flow today = SELL proceeds − BUY costs (both at actual fill prices).
+    # Negative result = paid more to buy than received from selling = net loss.
+    pnl_result = await db.execute(
         text("""
-            SELECT COALESCE(SUM((price - avg_fill_price) * filled_qty), 0) AS realised_pnl
-            FROM   live_orders
-            WHERE  user_id   = :uid
-              AND  direction  = 'SELL'
-              AND  status     = 'COMPLETE'
-              AND  placed_at >= :today
+            SELECT
+                COALESCE(SUM(CASE WHEN direction = 'SELL' THEN avg_fill_price * qty ELSE 0 END), 0)
+              - COALESCE(SUM(CASE WHEN direction = 'BUY'  THEN avg_fill_price * qty ELSE 0 END), 0)
+                AS day_net_pnl
+            FROM live_orders
+            WHERE user_id        = :uid
+              AND status         = 'COMPLETE'
+              AND avg_fill_price IS NOT NULL
+              AND placed_at     >= :today
         """),
         {"uid": str(user_id), "today": today_start},
     )
-    realised_pnl = float(result.scalar() or 0)
-    # negative realised_pnl = net loss
-    if realised_pnl >= 0:
-        return  # profit or break-even — no limit breach
+    day_net_pnl = float(pnl_result.scalar() or 0)
 
-    loss_amount = abs(realised_pnl)
+    if day_net_pnl >= 0:
+        return  # net profit or break-even — no limit breach
 
+    loss_amount = abs(day_net_pnl)
+
+    # ── Read user loss-limit setting ─────────────────────────────────────────────────────
     settings_row = await db.execute(
-        text("SELECT paper_balance, daily_loss_limit_pct FROM user_settings WHERE user_id = :uid"),
+        text("SELECT daily_loss_limit_pct FROM user_settings WHERE user_id = :uid"),
         {"uid": str(user_id)},
     )
-    settings_row = settings_row.first()
-    if not settings_row:
+    settings = settings_row.first()
+    if not settings:
         return
 
-    limit_pct        = float(settings_row.daily_loss_limit_pct)
+    limit_pct = float(settings.daily_loss_limit_pct)
+    if limit_pct <= 0:
+        return  # not configured — skip enforcement
 
-    # For live trading, compute portfolio value from today's starting live positions,
-    # not paper_balance which is a separate simulation.
-    # Use paper_balance as a fallback denominator if no live portfolio data available.
-    portfolio_value  = float(settings_row.paper_balance)
+    # ── Fix 2: stable MTM denominator ─────────────────────────────────────────────────
+    # Gross BUY capital = total fill value of all COMPLETE BUY orders (lifetime).
+    # Stable denominator: does not collapse to zero after profitable exits or
+    # partial withdrawals, unlike the previous net-cash-flow approach.
+    capital_result = await db.execute(
+        text("""
+            SELECT COALESCE(SUM(avg_fill_price * qty), 0) AS gross_buy_capital
+            FROM live_orders
+            WHERE user_id        = :uid
+              AND direction      = 'BUY'
+              AND status         = 'COMPLETE'
+              AND avg_fill_price IS NOT NULL
+        """),
+        {"uid": str(user_id)},
+    )
+    gross_buy_capital = float(capital_result.scalar() or 0)
 
-    # Compute live portfolio value as net BUY cost minus net SELL proceeds of all
-    # COMPLETE orders.  SUM(price * filled_qty) for ALL orders overestimates because
-    # it counts both sides; the net BUY-minus-SELL figure reflects current exposure.
-    try:
-        holdings_result = await db.execute(
-            text("""
-                SELECT
-                    COALESCE(SUM(CASE WHEN direction = 'BUY'  THEN avg_fill_price * filled_qty ELSE 0 END), 0)
-                  - COALESCE(SUM(CASE WHEN direction = 'SELL' THEN avg_fill_price * filled_qty ELSE 0 END), 0)
-                    AS net_portfolio_value
-                FROM live_orders
-                WHERE user_id = :uid AND status = 'COMPLETE'
-            """),
-            {"uid": str(user_id)},
-        )
-        live_value = float(holdings_result.scalar() or 0)
-        if live_value > 0:
-            portfolio_value = live_value
-    except Exception:
-        pass  # use paper_balance as fallback
+    if gross_buy_capital <= 0:
+        return  # no completed BUY trades yet — nothing to enforce against
 
-    limit_amount     = portfolio_value * limit_pct / 100.0
+    limit_amount = gross_buy_capital * limit_pct / 100.0
 
     if loss_amount >= limit_amount:
-        # Flip to paper trading
+        # Auto-flip to paper mode
         await db.execute(
             text("""
                 UPDATE user_settings
@@ -178,12 +183,15 @@ async def _enforce_daily_loss_limit(user_id: uuid.UUID, db: AsyncSession) -> Non
         logger.warning(
             "live_trade.daily_loss_limit_reached",
             user_id=str(user_id),
-            loss_amount=loss_amount,
-            limit_amount=limit_amount,
+            loss_amount=round(loss_amount, 2),
+            limit_amount=round(limit_amount, 2),
+            limit_pct=limit_pct,
+            gross_buy_capital=round(gross_buy_capital, 2),
         )
         raise ValueError(
-            f"Daily loss limit reached (₹{loss_amount:,.2f} ≥ {limit_pct}% of portfolio). "
-            "Switched to paper trading."
+            f"Daily loss limit reached: ₹{loss_amount:,.2f} lost today "
+            f"(≥ {limit_pct}% of ₹{gross_buy_capital:,.2f} deployed capital). "
+            "Live trading paused — switched to paper mode."
         )
 
 
