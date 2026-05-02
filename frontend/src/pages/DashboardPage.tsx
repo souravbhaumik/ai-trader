@@ -1,4 +1,4 @@
-﻿import { useQuery } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { Wallet, Activity, Target, Clock, TrendingUp, TrendingDown, RefreshCw } from 'lucide-react'
 import { apiClient } from '../api/client'
@@ -15,6 +15,8 @@ interface IndexQuote {
 interface Signal {
   id: string; symbol: string; signal_type: string; confidence: number
   entry_price: number | null; target_price: number | null; ts: string
+  // Phase 12: institutional alpha metrics from Phase 11 delivery engine
+  delivery_pct?: number | null; pcr_ratio?: number | null;
 }
 interface PortfolioSummary {
   cash_balance: number; open_positions: number; open_value: number
@@ -247,7 +249,7 @@ export default function DashboardPage() {
           ) : (
             <table className="data-table">
               <thead><tr>
-                <th>Symbol</th><th>Signal</th><th>Confidence</th><th>Entry</th><th>Target</th><th>Time</th><th></th>
+                <th>Symbol</th><th>Signal</th><th>Inst. Alpha</th><th>Confidence</th><th>Entry</th><th>Target</th><th>Time</th><th></th>
               </tr></thead>
               <tbody>
                 {signals.map(s => (
@@ -263,6 +265,17 @@ export default function DashboardPage() {
                         style={{ cursor: s.signal_type !== 'HOLD' ? 'pointer' : undefined }}
                         onClick={() => s.signal_type !== 'HOLD' && setOrderDefaults({ symbol: s.symbol, direction: s.signal_type === 'SELL' ? 'SELL' : 'BUY', entryPrice: s.entry_price, targetPrice: s.target_price, stopLoss: null })}
                       >{s.signal_type}</span>
+                    </td>
+                    {/* Phase 12: Institutional Alpha — delivery % + PCR */}
+                    <td>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                        <div style={{ fontSize: 11, fontWeight: 600, color: s.delivery_pct && s.delivery_pct > 0.4 ? 'var(--green)' : 'var(--text-muted)' }}>
+                          {s.delivery_pct != null ? `${(s.delivery_pct * 100).toFixed(0)}% Deliv` : '—'}
+                        </div>
+                        <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+                          {s.pcr_ratio != null ? `PCR ${s.pcr_ratio.toFixed(2)}` : '—'}
+                        </div>
+                      </div>
                     </td>
                     <td>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>

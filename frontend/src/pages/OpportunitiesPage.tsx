@@ -1,4 +1,4 @@
-﻿import { useQuery } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import { Zap, TrendingUp, TrendingDown } from 'lucide-react'
 import { apiClient } from '../api/client'
 import ForecastModal from '../components/ForecastModal'
@@ -10,6 +10,8 @@ interface Signal {
   id: string; symbol: string; ts: string; signal_type: 'BUY' | 'SELL' | 'HOLD'
   confidence: number; entry_price: number | null; target_price: number | null
   stop_loss: number | null; model_version: string
+  // Phase 12: institutional alpha metrics
+  delivery_pct?: number | null; pcr_ratio?: number | null;
 }
 
 function ScoreBar({ value }: { value: number }) {
@@ -92,6 +94,19 @@ export default function OpportunitiesPage() {
                 <div className="opp-score-row">
                   <span className="text-sm text-muted">Confidence</span>
                   <ScoreBar value={s.confidence} />
+                </div>
+                {/* Phase 12: Institutional Alpha strip */}
+                <div style={{ display:'flex', justifyContent:'space-between', marginTop:8, padding:'6px 10px', background:'var(--bg-hover)', borderRadius:6 }}>
+                  <div style={{ fontSize:11 }}>
+                    <span className="text-muted">Deliv: </span>
+                    <span style={{ fontWeight:600, color: s.delivery_pct && s.delivery_pct > 0.4 ? 'var(--green)' : 'inherit' }}>
+                      {s.delivery_pct != null ? `${(s.delivery_pct * 100).toFixed(0)}%` : '—'}
+                    </span>
+                  </div>
+                  <div style={{ fontSize:11 }}>
+                    <span className="text-muted">PCR: </span>
+                    <span style={{ fontWeight:600 }}>{s.pcr_ratio != null ? s.pcr_ratio.toFixed(2) : '—'}</span>
+                  </div>
                 </div>
                 <div className="opp-prices">
                   <div><div className="text-muted text-sm">Entry</div>

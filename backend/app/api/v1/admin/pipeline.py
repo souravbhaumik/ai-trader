@@ -1,4 +1,4 @@
-"""Admin pipeline API � trigger and monitor Celery data tasks.
+"""Admin pipeline API — trigger and monitor Celery data tasks.
 
 Endpoints
 ---------
@@ -13,6 +13,8 @@ GET   /admin/pipeline/models                List all trained model versions
 POST  /admin/pipeline/models/{id}/promote   Promote a model to active
 POST  /admin/pipeline/models/{id}/rollback  Deactivate a model
 POST  /admin/pipeline/populate-universe     Populate stock_universe from NSE master CSV
+POST  /admin/pipeline/fno-ingest            Manually trigger F&O PCR/OI data pull  [Phase 10]
+POST  /admin/pipeline/meta-learner          Manually trigger weight optimization    [Phase 10]
 GET   /admin/pipeline/status                Get last-run status for all pipeline tasks
 """
 from __future__ import annotations
@@ -554,8 +556,76 @@ async def trigger_download_logos(
     logger.info("pipeline.download_logos_enqueued", task_id=result.id)
     return TaskEnqueuedResponse(
         task_id=result.id,
-        message="Logo download enqueued. Check Admin ? Pipeline ? Step 9 logs for progress.",
+        message="Logo download enqueued. Check Admin → Pipeline → Step 11 logs for progress.",
     )
+
+
+# -- Phase 10: F&O Ingest ------------------------------------------------------
+
+@router.post(
+    "/fno-ingest",
+    response_model=TaskEnqueuedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def trigger_fno_ingest(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    """Manually trigger F&O (PCR/OI) data pull for all F&O-enabled symbols (admin only)."""
+    await require_admin(request, session)
+
+    try:
+        from app.tasks.fno_ingest import ingest_fno_data
+        result = ingest_fno_data.delay()
+    except Exception as exc:
+        logger.error("pipeline.fno_ingest_enqueue_failed", err=str(exc))
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Could not reach Celery broker. Is the worker running?",
+        )
+
+    logger.info("pipeline.fno_ingest_queued", task_id=result.id)
+    return TaskEnqueuedResponse(
+        task_id=result.id,
+        message="F&O ingest enqueued. PCR/OI data will be cached in Redis within ~60s.",
+    )
+
+
+# -- Phase 10: Meta-Learner weight optimization --------------------------------
+
+@router.post(
+    "/meta-learner",
+    response_model=TaskEnqueuedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def trigger_meta_learner(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    """Manually trigger the Meta-Learner 30-day weight optimization (admin only).
+
+    Audits the last 30 days of signal_outcomes, runs a grid search over
+    component weights (Tech, ML, Sentiment, F&O), and persists the optimal
+    weights to Redis (system:dynamic_weights).
+    """
+    await require_admin(request, session)
+
+    try:
+        from app.tasks.meta_learner import optimize_weights
+        result = optimize_weights.delay()
+    except Exception as exc:
+        logger.error("pipeline.meta_learner_enqueue_failed", err=str(exc))
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Could not reach Celery broker. Is the worker running?",
+        )
+
+    logger.info("pipeline.meta_learner_queued", task_id=result.id)
+    return TaskEnqueuedResponse(
+        task_id=result.id,
+        message="Meta-Learner optimization enqueued. system:dynamic_weights updates on completion.",
+    )
+
 
 _ALL_TASK_NAMES = [
     "universe_population",
@@ -564,6 +634,8 @@ _ALL_TASK_NAMES = [
     "backfill",
     "feature_engineering",
     "eod_ingest",
+    "fno_ingest",        # Phase 10: F&O PCR/OI ingestion
+    "meta_learner",      # Phase 10: dynamic weight optimization
     "ml_training",
     "signal_generator",
     "news_sentiment",

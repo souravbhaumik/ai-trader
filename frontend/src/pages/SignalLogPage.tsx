@@ -1,4 +1,4 @@
-﻿import React, { useMemo, useState } from 'react'
+import React, { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Activity, ChevronUp, ChevronDown, ChevronLeft, ChevronRight, Radio, Zap, MessageSquare } from 'lucide-react'
 import { apiClient } from '../api/client'
@@ -12,6 +12,8 @@ interface Signal {
   confidence: number; entry_price: number | null; target_price: number | null
   stop_loss: number | null; model_version: string; is_active: boolean
   explanation: string | null
+  // Phase 12: institutional alpha metrics
+  delivery_pct?: number | null; pcr_ratio?: number | null;
 }
 interface SignalResult { total: number; page: number; per_page: number; signals: Signal[] }
 
@@ -147,6 +149,7 @@ export default function SignalLogPage() {
                     Time {sortDir === 'asc' ? <ChevronUp size={11}/> : <ChevronDown size={11}/>}
                   </th>
                   <th>Symbol</th><th>Signal</th><th>Confidence</th>
+                  <th>Deliv %</th><th>PCR</th>
                   <th>Entry</th><th>Target</th><th>SL</th><th>Model</th><th>Status</th><th>Forecast</th><th></th>
                 </tr>
               </thead>
@@ -175,6 +178,11 @@ export default function SignalLogPage() {
                           >{s.signal_type}</span>
                         </td>
                         <td className="text-mono text-sm">{(s.confidence * 100).toFixed(0)}%</td>
+                        {/* Phase 12: delivery % green when >40%, dashes until DB has data */}
+                        <td style={{ color: s.delivery_pct && s.delivery_pct > 0.4 ? 'var(--green)' : 'inherit' }} className="text-mono text-sm">
+                          {s.delivery_pct != null ? `${(s.delivery_pct * 100).toFixed(0)}%` : '—'}
+                        </td>
+                        <td className="text-mono text-sm">{s.pcr_ratio != null ? s.pcr_ratio.toFixed(2) : '—'}</td>
                         <td className="text-mono text-sm">{s.entry_price  != null ? `₹${s.entry_price.toLocaleString('en-IN')}` : '—'}</td>
                         <td className="text-mono text-sm">{s.target_price != null ? `₹${s.target_price.toLocaleString('en-IN')}` : '—'}</td>
                         <td className="text-mono text-sm">{s.stop_loss    != null ? `₹${s.stop_loss.toLocaleString('en-IN')}` : '—'}</td>
@@ -201,7 +209,7 @@ export default function SignalLogPage() {
                       </tr>
                       {isExpanded && s.explanation && (
                         <tr>
-                          <td colSpan={11} style={{ padding:'10px 16px', background:'var(--surface-raised, rgba(255,255,255,0.03))', borderTop:'none' }}>
+                        <td colSpan={13} style={{ padding:'10px 16px', background:'var(--surface-raised, rgba(255,255,255,0.03))', borderTop:'none' }}>
                             <div style={{ display:'flex', gap:8, alignItems:'flex-start' }}>
                               <MessageSquare size={14} style={{ marginTop:2, flexShrink:0, color:'var(--accent-blue)' }}/>
                               <p style={{ margin:0, fontSize:13, lineHeight:1.6, color:'var(--text-secondary)', fontStyle:'italic' }}>

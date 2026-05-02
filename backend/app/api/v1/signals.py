@@ -79,7 +79,7 @@ async def list_signals(
         text(f"""
             SELECT id, symbol, ts, signal_type, confidence,
                    entry_price, target_price, stop_loss, model_version, is_active,
-                   explanation
+                   explanation, features
             FROM signals
             WHERE {where_sql}
             ORDER BY ts DESC
@@ -91,6 +91,7 @@ async def list_signals(
 
     signals = []
     for row in rows:
+        features = row[11] if row[11] else {}
         signals.append({
             "id":            str(row[0]),
             "symbol":        row[1],
@@ -103,6 +104,9 @@ async def list_signals(
             "model_version": row[8],
             "is_active":     row[9],
             "explanation":   row[10],
+            # Phase 12: Phase 11 institutional metrics extracted from JSONB features
+            "delivery_pct":  features.get("delivery_pct") if isinstance(features, dict) else None,
+            "pcr_ratio":     features.get("pcr_ratio")    if isinstance(features, dict) else None,
         })
 
     return {
@@ -433,7 +437,7 @@ async def refresh_signal(
             with _gsync() as db:
                 rows = db.execute(
                     text("""
-                        SELECT close, high, low, volume
+                        SELECT close, high, low, volume, delivery_pct
                         FROM   ohlcv_daily
                         WHERE  symbol = :s
                         ORDER  BY ts DESC LIMIT 90
@@ -442,11 +446,13 @@ async def refresh_signal(
                 ).fetchall()
             if len(rows) < 28:
                 return None
-            rows_asc = list(reversed(rows))
-            closes  = [float(r[0]) for r in rows_asc]
-            highs   = [float(r[1]) for r in rows_asc]
-            lows    = [float(r[2]) for r in rows_asc]
-            volumes = [float(r[3]) for r in rows_asc]
+            rows_asc  = list(reversed(rows))
+            closes    = [float(r[0]) for r in rows_asc]
+            highs     = [float(r[1]) for r in rows_asc]
+            lows      = [float(r[2]) for r in rows_asc]
+            volumes   = [float(r[3]) for r in rows_asc]
+            # Phase 12 fix: pass delivery history so features are not neutral-defaulted
+            deliveries = [float(r[4]) if r[4] is not None else None for r in rows_asc]
 
             from app.tasks.signal_generator import _score_symbol
             tech = _score_symbol(closes)
@@ -463,7 +469,8 @@ async def refresh_signal(
             ml_available = ml_predict(dict.fromkeys(FEATURE_NAMES, 0.0)) is not None
             if ml_available:
                 s = max(-1.0, min(1.0, sentiment))
-                feat_vec = build_features(sym, closes, highs, lows, volumes, s)
+                feat_vec = build_features(sym, closes, highs, lows, volumes, s,
+                                          delivery_pcts=deliveries)
                 ml_result = ml_predict(feat_vec)
                 if ml_result and ml_result["direction"] != "HOLD":
                     ml_dir   = ml_result["direction"]
