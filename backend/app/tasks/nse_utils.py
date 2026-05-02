@@ -140,15 +140,21 @@ def download_sec_bhav_csv(trade_date: datetime, timeout: int = 30) -> Optional[D
         for _, row in df.iterrows():
             symbol = str(row["SYMBOL"]).strip()
             try:
+                # DELIV_PER from NSE is already a percentage (e.g. 45.23 = 45.23%)
+                # Divide by 100 exactly once here → stored as fraction [0.0, 1.0].
+                # Callers must NOT divide again.
+                raw_deliv = row.get("DELIV_PER", None)
+                delivery_pct = float(raw_deliv) / 100.0 if raw_deliv is not None and str(raw_deliv).strip() != "-" else None
                 result[symbol] = {
-                    "symbol": symbol,
-                    "ts": csv_date,
-                    "open": float(row["OPEN_PRICE"]),
-                    "high": float(row["HIGH_PRICE"]),
-                    "low": float(row["LOW_PRICE"]),
-                    "close": float(row["CLOSE_PRICE"]),
-                    "volume": int(float(row["TTL_TRD_QNTY"])),
-                    "source": "nse",
+                    "symbol":       symbol,
+                    "ts":           csv_date,
+                    "open":         float(row["OPEN_PRICE"]),
+                    "high":         float(row["HIGH_PRICE"]),
+                    "low":          float(row["LOW_PRICE"]),
+                    "close":        float(row["CLOSE_PRICE"]),
+                    "volume":       int(float(row["TTL_TRD_QNTY"])),
+                    "delivery_pct": delivery_pct,   # [0.0, 1.0] or None
+                    "source":       "nse",
                 }
             except Exception:
                 pass

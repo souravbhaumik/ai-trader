@@ -304,10 +304,10 @@ def generate_signals(self):
             batch = symbols[idx : idx + _BATCH_SIZE]
 
             for sym in batch:
-                # ── Fetch last _LOOKBACK days of OHLCV ────────────────────────
+                # ── Fetch last _LOOKBACK days of OHLCV (incl. delivery_pct) ──
                 rows = session.execute(
                     text("""
-                        SELECT ts, close, high, low, volume
+                        SELECT ts, close, high, low, volume, delivery_pct
                         FROM   ohlcv_daily
                         WHERE  symbol = :symbol
                         ORDER  BY ts DESC
@@ -336,7 +336,7 @@ def generate_signals(self):
                     and _dt.time(9, 15) <= _now_ist.time() <= _dt.time(15, 30)
                 )
                 if _market_open and len(rows_asc) > _MIN_BARS:
-                    # rows_asc[-1] is (ts, close, high, low, volume)
+                    # rows_asc[-1] is (ts, close, high, low, volume, delivery_pct)
                     _last_ts = rows_asc[-1][0]
                     _last_date = (
                         _last_ts.date() if hasattr(_last_ts, "date")
@@ -350,10 +350,12 @@ def generate_signals(self):
                             discarded_date=str(_last_date),
                         )
 
-                closes  = [float(r[1]) for r in rows_asc]
-                highs   = [float(r[2]) for r in rows_asc]
-                lows    = [float(r[3]) for r in rows_asc]
-                volumes = [float(r[4]) for r in rows_asc]
+                closes    = [float(r[1]) for r in rows_asc]
+                highs     = [float(r[2]) for r in rows_asc]
+                lows      = [float(r[3]) for r in rows_asc]
+                volumes   = [float(r[4]) for r in rows_asc]
+                # delivery_pct: None means no data yet for this bar (pre-migration rows)
+                deliveries = [float(r[5]) if r[5] is not None else None for r in rows_asc]
 
                 # ── Technical signal (always computed) ────────────────────────
                 tech_signal = _score_symbol(closes)
@@ -386,7 +388,8 @@ def generate_signals(self):
                         sym, closes, highs, lows, volumes,
                         sentiment,
                         fno_metrics.get("pcr_ratio") if fno_metrics else None,
-                        None,   # OI momentum: TBD in Phase 10 follow-up
+                        None,         # OI momentum: TBD Phase 10 follow-up
+                        deliveries,   # Phase 11: pass historical delivery_pct series
                     )
                     ml_result = ml_predict(feat_vec)
 
@@ -426,6 +429,34 @@ def generate_signals(self):
                         features["score_ml"]    = round(ml_score, 4)
                         features["score_sent"]  = round(sent_score, 4)
                         features["score_fno"]   = round(fno_score, 4)
+
+                        # ── Phase 11: Meta-Labeling confidence gate ────────────
+                        # Discard choppy signals: blended score must be >0.65 or
+                        # <0.35 (maps to final_conf > 0.30 after abs(x-0.5)*2).
+                        if final_conf < 0.30:
+                            logger.debug(
+                                "signal_generator.meta_label_discard",
+                                symbol=sym, conf=round(final_conf, 4),
+                            )
+                            skipped += 1
+                            continue
+
+                        # ── Phase 11: Volatility-Adjusted Targets ─────────────
+                        # Use ATR (in price units) to set targets instead of
+                        # fixed 5%/3%.  Formula:
+                        #   Target = entry + 2 × ATR   (BUY)
+                        #   Stop   = entry - 1.5 × ATR (BUY)
+                        # atr_pct is stored as fraction of close, so:
+                        #   ATR_price = entry × atr_pct
+                        atr_pct_val = feat_vec.get("atr_pct", 0.03)   # fraction of close
+                        atr_price   = entry * atr_pct_val             # convert to INR
+                        if final_dir == "BUY":
+                            target    = round(entry + atr_price * 2.0, 2)
+                            stop_loss = round(entry - atr_price * 1.5, 2)
+                        else:
+                            target    = round(entry - atr_price * 2.0, 2)
+                            stop_loss = round(entry + atr_price * 1.5, 2)
+                        features["atr_target_used"] = round(atr_price, 4)
 
                 # ── Phase 5: LSTM anomaly penalty ─────────────────────────────
                 # Build bar dicts needed by lstm_service (same rows already fetched)

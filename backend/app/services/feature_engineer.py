@@ -41,6 +41,10 @@ FEATURE_NAMES: list[str] = [
     # Phase 10 additions — F&O features (appended; old models get neutral defaults)
     "pcr_ratio",         # Put-Call Ratio (Total Put OI / Total Call OI); neutral = 1.0
     "oi_momentum",       # Change in total OI as fraction; neutral = 0.0
+    # Phase 11 additions — Institutional Alpha: Delivery Engine
+    "delivery_pct",      # NSE delivery percentage as fraction [0.0, 1.0]; neutral = 0.4
+    "delivery_slope",    # 5-day linear-regression slope of delivery_pct; 0.0 = flat
+    "smart_money_idx",   # volume_ratio × delivery_pct — spikes signal institutional accumulation
     # Phase 3b additions — added without breaking old models (appended at end)
     "momentum_1m",       # 21-bar price return: (close[-1] / close[-22]) - 1
     "momentum_3m",       # 63-bar price return: (close[-1] / close[-64]) - 1
@@ -209,6 +213,24 @@ def _volume_ratio(volumes: np.ndarray, period: int = 20) -> float:
     return float(volumes[-1] / avg)
 
 
+def _delivery_slope(delivery_pcts: np.ndarray, period: int = 5) -> float:
+    """5-day linear-regression slope of delivery percentage.
+
+    A positive slope means institutional delivery is rising (accumulation signal).
+    Returns 0.0 if insufficient non-NaN data.
+    """
+    if len(delivery_pcts) < period:
+        return 0.0
+    y = delivery_pcts[-period:]
+    if np.all(np.isnan(y)):
+        return 0.0
+    x = np.arange(len(y), dtype=float)
+    mask = ~np.isnan(y)
+    if np.sum(mask) < 2:
+        return 0.0
+    return float(np.polyfit(x[mask], y[mask], 1)[0])
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  Public interface
 # ══════════════════════════════════════════════════════════════════════════════
@@ -222,6 +244,7 @@ def build_features(
     sentiment_score: Optional[float] = None,
     pcr_ratio: Optional[float] = None,
     oi_momentum: Optional[float] = None,
+    delivery_pcts: Optional[list[float]] = None,
 ) -> dict[str, float]:
     """Return a feature dict for ``symbol`` using provided OHLCV series.
 
@@ -241,11 +264,26 @@ def build_features(
         Put-Call Ratio from NSE option chain. Default 1.0 (neutral).
     oi_momentum:
         Open Interest % change. Default 0.0 (no change).
+    delivery_pcts:
+        Historical delivery percentages as fractions [0.0, 1.0], oldest first.
+        ``None`` or all-NaN → neutral defaults (0.40 delivery, 0.0 slope).
     """
     c = np.array(closes,  dtype=float)
     h = np.array(highs,   dtype=float)
     l = np.array(lows,    dtype=float)
     v = np.array(volumes,  dtype=float)
+
+    # Phase 11: delivery array — use NaN where data is missing
+    d = np.array(
+        [x if x is not None else np.nan for x in delivery_pcts],
+        dtype=float,
+    ) if delivery_pcts else np.full(len(c), np.nan)
+
+    vol_ratio = _volume_ratio(v)
+
+    # Latest delivery value — neutral = 40% if no data yet
+    curr_deliv_raw = d[-1] if len(d) > 0 and not np.isnan(d[-1]) else None
+    curr_deliv = curr_deliv_raw if curr_deliv_raw is not None else 0.40
 
     feats: dict[str, float] = {
         "rsi_14":        _rsi(c),
@@ -254,13 +292,18 @@ def build_features(
         "atr_pct":       _atr_pct(h, l, c),
         "obv_trend":     _obv_trend(c, v),
         "adx_14":        _adx(h, l, c),
-        "volume_ratio":  _volume_ratio(v),
+        "volume_ratio":  vol_ratio,
         "close_vs_sma20": _sma_ratio(c, 20),
         "close_vs_sma50": _sma_ratio(c, 50),
         "sentiment_score": float(sentiment_score) if sentiment_score is not None else 0.0,
         # Phase 10: F&O features — neutral defaults when no data available
-        "pcr_ratio":      float(pcr_ratio)    if pcr_ratio    is not None else 1.0,
-        "oi_momentum":    float(oi_momentum)  if oi_momentum  is not None else 0.0,
+        "pcr_ratio":      float(pcr_ratio)   if pcr_ratio   is not None else 1.0,
+        "oi_momentum":    float(oi_momentum) if oi_momentum is not None else 0.0,
+        # Phase 11: Institutional Alpha — Delivery Engine
+        "delivery_pct":   curr_deliv,                          # raw fraction [0, 1]
+        "delivery_slope": _delivery_slope(d),                  # 5-day trend
+        "smart_money_idx": vol_ratio * curr_deliv              # spikes = institutional accumulation
+        if not (isinstance(vol_ratio, float) and math.isnan(vol_ratio)) else 0.0,
         # Phase 3b — momentum / volatility / 52-week range
         "momentum_1m":       _momentum(c, 21),
         "momentum_3m":       _momentum(c, 63),
