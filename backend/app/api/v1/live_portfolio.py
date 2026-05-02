@@ -1,4 +1,4 @@
-﻿"""Live portfolio endpoints — Angel One order execution.
+"""Live portfolio endpoints — Angel One order execution.
 
 POST /portfolio/live/orders              — place a real order via Angel One
 GET  /portfolio/live/orders              — list recent orders (from our DB)
@@ -67,6 +67,41 @@ class PositionOut(BaseModel):
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
+
+@router.get("/live/orders/calculate-size")
+async def calculate_size(
+    symbol: str,
+    entry_price: float,
+    stop_loss: float,
+    risk_pct: float = 1.0,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    """Suggest a trade quantity using ATR-based volatility-adjusted sizing.
+
+    Formula: Q = (portfolio_value × risk_pct/100) / (entry_price − stop_loss)
+
+    This ensures the monetary loss if stop-loss is hit equals exactly
+    ``risk_pct``% of portfolio regardless of the stock's volatility.
+    """
+    qty = await svc.calculate_volatility_adjusted_qty(
+        db,
+        user_id=current_user.id,
+        symbol=symbol.upper(),
+        entry_price=entry_price,
+        stop_loss=stop_loss,
+        risk_pct=risk_pct,
+    )
+    distance = abs(entry_price - stop_loss)
+    return {
+        "symbol": symbol.upper(),
+        "qty": qty,
+        "risk_pct": risk_pct,
+        "entry_price": entry_price,
+        "stop_loss": stop_loss,
+        "distance": round(distance, 2),
+    }
+
 
 @router.post("/live/orders", response_model=LiveOrderOut, status_code=status.HTTP_201_CREATED)
 async def place_live_order(

@@ -216,20 +216,45 @@ def generate_signals(self):
     ml_available = ml_predict(dict.fromkeys(FEATURE_NAMES, 0.0)) is not None
     append_task_log(_TASK, f"ML model active: {ml_available}")
 
+    # ── Dynamic Weights (Phase 10) ────────────────────────────────────────────
+    # Load optimised weights from Meta-Learner or fall back to .env defaults.
+    weights = {
+        "W_TECH":      _W_TECH,
+        "W_ML":        _W_ML,
+        "W_SENTIMENT": _W_SENTIMENT,
+        "W_FNO":       0.10,  # default F&O weight
+    }
+    try:
+        import redis as _redis_w
+        from app.core.config import settings as _cfg_w
+        _rw = _redis_w.from_url(_cfg_w.redis_url, decode_responses=True)
+        try:
+            raw_w = _rw.get("system:dynamic_weights")
+            if raw_w:
+                weights.update(json.loads(raw_w))
+                append_task_log(_TASK, "Using dynamic Meta-Learner weights.")
+        finally:
+            _rw.close()
+    except Exception as exc:
+        logger.warning("signal_generator.weights_fetch_failed", err=str(exc))
+
     # ── Prefetch all sentiment scores from Redis ──────────────────────────────
     sentiment_cache: Dict[str, float] = {}
     try:
         import redis as _redis
         from app.core.config import settings
         r = _redis.from_url(settings.redis_url, decode_responses=True)
-        keys = r.keys("sentiment:*")
-        if keys:
-            vals = r.mget(keys)
-            for k, v in zip(keys, vals):
-                if v:
-                    import json as _json
-                    sym = k.removeprefix("sentiment:")
-                    sentiment_cache[sym] = float(_json.loads(v).get("score", 0.0))
+        try:
+            keys = r.keys("sentiment:*")
+            if keys:
+                vals = r.mget(keys)
+                for k, v in zip(keys, vals):
+                    if v:
+                        import json as _json
+                        sym = k.removeprefix("sentiment:")
+                        sentiment_cache[sym] = float(_json.loads(v).get("score", 0.0))
+        finally:
+            r.close()
     except Exception as exc:
         logger.warning("signal_generator.sentiment_prefetch_failed", err=str(exc))
 
@@ -251,6 +276,29 @@ def generate_signals(self):
 
         logger.info("signal_generator.start", total_symbols=total, ml_mode=ml_available)
         append_task_log(_TASK, f"Loaded {total} active symbols. Starting signal computation…")
+
+        # ── Bulk-prefetch F&O metrics (Phase 10) in one asyncio pass ──────────
+        # Avoids creating a new event loop per symbol (asyncio.run() per symbol
+        # causes RuntimeError on some platforms and is ~200x slower).
+        fno_cache: Dict[str, dict] = {}
+        if ml_available:
+            try:
+                import asyncio as _asyncio
+                from app.services.fno_service import get_fno_metrics_cached as _get_fno
+
+                async def _prefetch_fno() -> None:
+                    results = await _asyncio.gather(
+                        *[_get_fno(s) for s in symbols],
+                        return_exceptions=True,
+                    )
+                    for s, res in zip(symbols, results):
+                        if isinstance(res, dict):
+                            fno_cache[s] = res
+
+                _asyncio.run(_prefetch_fno())
+                append_task_log(_TASK, f"F&O prefetch complete: {len(fno_cache)} symbols cached.")
+            except Exception as exc:
+                logger.warning("signal_generator.fno_prefetch_failed", err=str(exc))
 
         for idx in range(0, total, _BATCH_SIZE):
             batch = symbols[idx : idx + _BATCH_SIZE]
@@ -324,14 +372,25 @@ def generate_signals(self):
                 final_dir  = tech_dir
                 final_conf = tech_conf
 
-                # ── Phase 3: blend ML + sentiment ─────────────────────────────
+                # ── Phase 3: blend ML + sentiment + F&O (Phase 10) ──────────────
                 if ml_available:
                     sentiment = max(-1.0, min(1.0, sentiment_cache.get(sym, 0.0)))
-                    feat_vec  = build_features(sym, closes, highs, lows, volumes, sentiment)
+
+                    # Look up pre-fetched F&O metrics (no asyncio.run per symbol)
+                    from app.services.fno_service import score_fno
+                    fno_metrics = fno_cache.get(sym)          # None if no F&O data
+                    fno_score_raw = score_fno(fno_metrics)    # [-1, 1]
+                    fno_score = (fno_score_raw + 1) / 2       # map to [0, 1]
+
+                    feat_vec  = build_features(
+                        sym, closes, highs, lows, volumes,
+                        sentiment,
+                        fno_metrics.get("pcr_ratio") if fno_metrics else None,
+                        None,   # OI momentum: TBD in Phase 10 follow-up
+                    )
                     ml_result = ml_predict(feat_vec)
 
                     if ml_result:
-                        # Always record that ML was used, even when direction is HOLD
                         model_ver = ml_result["version"]
 
                     if ml_result and ml_result["direction"] != "HOLD":
@@ -339,35 +398,42 @@ def generate_signals(self):
                         ml_prob  = ml_result["probability"]   # [0,1] BUY probability
                         ml_score = ml_prob if ml_dir == "BUY" else (1 - ml_prob)
 
-                        # Sentiment contribution: map [-1,1] → [0,1] for BUY polarity
+                        # Sentiment: map [-1,1] → [0,1] for BUY polarity
                         sent_score = (sentiment + 1) / 2
 
-                        # Convert tech confidence to direction-aligned score
+                        # Tech: direction-aligned [0,1] score
                         tech_score = tech_conf if tech_dir == "BUY" else (1 - tech_conf)
 
-                        # Weighted blend
+                        # Weighted blend (dynamic weights from Meta-Learner / .env fallback)
+                        w_sum = sum(weights.values())
                         blended = (
-                            _W_TECH      * tech_score  +
-                            _W_ML        * ml_score    +
-                            _W_SENTIMENT * sent_score
-                        )
+                            weights["W_TECH"]      * tech_score  +
+                            weights["W_ML"]        * ml_score    +
+                            weights["W_SENTIMENT"] * sent_score  +
+                            weights["W_FNO"]       * fno_score
+                        ) / (w_sum if w_sum > 0 else 1.0)
 
-                        # Direction: majority vote between tech + ML
                         final_dir  = "BUY" if blended >= 0.5 else "SELL"
                         final_conf = abs(blended - 0.5) * 2   # rescale to [0,1]
                         model_ver  = ml_result["version"]
 
-                        features["ml_probability"] = round(ml_prob, 4)
+                        features["ml_probability"]  = round(ml_prob, 4)
                         features["sentiment_score"] = round(sentiment, 4)
+                        features["fno_pcr"]         = fno_metrics.get("pcr_ratio") if fno_metrics else 1.0
                         features["blend_score"]     = round(blended, 4)
+                        # Component scores stored for Meta-Learner weekly audit
+                        features["score_tech"]  = round(tech_score, 4)
+                        features["score_ml"]    = round(ml_score, 4)
+                        features["score_sent"]  = round(sent_score, 4)
+                        features["score_fno"]   = round(fno_score, 4)
 
                 # ── Phase 5: LSTM anomaly penalty ─────────────────────────────
                 # Build bar dicts needed by lstm_service (same rows already fetched)
                 try:
                     from app.services.lstm_service import compute_anomaly_score  # noqa: PLC0415
                     bar_dicts = [
-                        {"close": float(r[0]), "high": float(r[1]),
-                         "low": float(r[2]), "volume": float(r[3])}
+                        {"close": float(r[1]), "high": float(r[2]),
+                         "low": float(r[3]), "volume": float(r[4])}
                         for r in rows_asc
                     ]
                     anomaly = compute_anomaly_score(sym, bar_dicts)
@@ -383,7 +449,7 @@ def generate_signals(self):
 
                 # ── Phase 3b: Fundamentals score ──────────────────────────────
                 # Reads from Redis cache (written daily by fundamentals_ingest)
-                # Adds ±10% weight to final confidence via a simple bump.
+                # Adds ±5 pp to final confidence via a directional bump.
                 try:
                     from app.services.fundamentals_service import (
                         get_fundamentals_from_cache, score_fundamentals,
@@ -391,7 +457,10 @@ def generate_signals(self):
                     import redis as _redis_fund
                     from app.core.config import settings as _cfg_fund
                     _rf = _redis_fund.from_url(_cfg_fund.redis_url, decode_responses=True)
-                    fund_data = get_fundamentals_from_cache(sym, redis_client=_rf)
+                    try:
+                        fund_data = get_fundamentals_from_cache(sym, redis_client=_rf)
+                    finally:
+                        _rf.close()
                     if fund_data:
                         fund_score = score_fundamentals(fund_data)   # [-1, 1]
                         # Bump of up to ±5 pp toward final direction
@@ -408,8 +477,8 @@ def generate_signals(self):
                 try:
                     from app.services.river_amf import get_model as _get_arf
                     _arf = _get_arf()
-                    # Ensure feat_vec is available (may be missing if ML unavailable)
-                    if "feat_vec" not in dir():
+                    # feat_vec is only defined when ml_available; build it for ARF if missing
+                    if not ml_available:
                         feat_vec = build_features(sym, closes, highs, lows, volumes,
                                                   sentiment_cache.get(sym, 0.0))
                     arf_pred = _arf.predict_one(feat_vec)      # 1=BUY, 0=SELL, None=not_ready

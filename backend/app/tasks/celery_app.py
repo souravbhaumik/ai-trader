@@ -39,6 +39,8 @@ celery_app = Celery(
         "app.tasks.upstox_token_refresh",
         "app.tasks.fundamentals_ingest",
         "app.tasks.breaking_news_scanner",
+        "app.tasks.fno_ingest",
+        "app.tasks.meta_learner",
     ],
 )
 
@@ -180,6 +182,19 @@ celery_app.conf.beat_schedule = {
     "upstox-token-check": {
         "task":     "app.tasks.upstox_token_refresh.check_upstox_tokens",
         "schedule": crontab(hour=7, minute=30, day_of_week="1-5"),
+    },
+    # F&O data ingest — daily at 6:30 PM IST (after NSE F&O data published post-close)
+    # NSE releases option chain EOD data by ~5 PM; 6:30 PM gives ample buffer.
+    "fno-ingest-daily": {
+        "task":     "app.tasks.fno_ingest.ingest_fno_data",
+        "schedule": crontab(hour=18, minute=30, day_of_week="1-5"),
+    },
+    # Meta-Learner weight optimisation — Saturday 3:00 AM IST
+    # Runs 1 hour after the LightGBM weekly retrain (2:00 AM) so it evaluates
+    # signals produced by the freshly-trained model.
+    "meta-learner-weekly": {
+        "task":     "app.tasks.meta_learner.optimize_weights",
+        "schedule": crontab(hour=3, minute=0, day_of_week="6"),  # Saturday 3:00 AM IST
     },
 }
 

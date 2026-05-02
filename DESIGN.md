@@ -981,39 +981,41 @@ REQUEST → Redis Cache (5 min TTL)
 
 ## 17. Full Signal Pipeline (9-Phase Architecture)
 
-### 17.1 Target Signal Blend Formula
+### 17.1 Target Signal Blend Formula (Institutional Upgrade)
 
 ```
-base_conf = 0.30×tech + 0.35×lgbm + 0.15×arf + 0.10×sentiment + 0.10×fund_score
+base_conf = W_tech×tech + W_lgbm×lgbm + W_arf×arf + W_sentiment×sentiment + W_fno×fno_score + W_fund×fund_score
+[Where W_x are dynamically optimized weekly by the Meta-Learner]
+
 after_cap = min(base_conf, fund_hard_cap)
 after_drift = after_cap × (1 - drift_penalty)
-after_anomaly = after_drift × (1 - anomaly_penalty)   [if LSTM model exists]
+after_anomaly = after_drift × (1 - anomaly_penalty)
 final_conf = min(after_anomaly × regime_multiplier, 1.0)
 ```
 
-### 17.2 Signal Weight Table
+### 17.2 Dynamic Meta-Learner (Weights)
 
-| Phase | Source | Weight | Status |
-|-------|--------|--------|--------|
-| Phase 1 | Technical (RSI, MACD, Bollinger, ATR, OBV, ADX) | 30% | ✅ Active |
-| Phase 5 | LightGBM (batch, weekly retrain) | 35% | ✅ Active |
-| Phase 6 | River ARF (online, daily adaptation) | 15% | ✅ Wired |
-| Phase 4 | FinBERT Sentiment | 10% | ✅ Active |
-| Phase 3b | Fundamentals quality score | 10% | ✅ Wired |
-| Phase 7 | Drift penalty (ADWIN) | modifier: up to −20% | ✅ Wired |
-| Phase 8 | Regime multiplier (HDBSCAN) | modifier: ×0.6 to ×1.1 | ✅ Wired |
-| Phase 9 | LSTM Anomaly penalty | modifier: up to −40% | ⚠ Needs model file |
+| Source | Default Weight | Meta-Learner Role |
+|-------|--------|--------|
+| Technical (RSI, MACD, etc.) | 30% | Dynamic Optimization |
+| LightGBM (Batch ML) | 35% | Dynamic Optimization |
+| River ARF (Online ML) | 10% | Dynamic Optimization |
+| FinBERT Sentiment | 10% | Dynamic Optimization |
+| F&O (PCR, OI Momentum) | 10% | NEW - Dynamic Optimization |
+| Fundamentals Score | 5% | Fixed Multiplier |
 
-### 17.3 Extended Technical Features (14-feature vector)
+### 17.3 Extended Feature Vector (16-feature vector)
 
 ```python
 FEATURE_NAMES = [
     "rsi_14", "macd_hist", "bb_pct_b", "atr_pct", "obv_trend", "adx_14",
     "volume_ratio", "close_vs_sma20", "close_vs_sma50", "sentiment_score",
+    "pcr_ratio",      # NEW: Put-Call Ratio (F&O)
+    "oi_momentum",    # NEW: Open Interest % Change (F&O)
     "momentum_1m",    # (close[-1] / close[-22]) - 1
     "momentum_3m",    # (close[-1] / close[-66]) - 1
     "hist_vol_20d",   # std(log_returns[-20:]) * sqrt(252)
-    "week52_proximity",  # (close - 52w_low) / (52w_high - 52w_low)
+    "week52_proximity", # (close - 52w_low) / (52w_high - 52w_low)
 ]
 ```
 
@@ -1183,8 +1185,34 @@ async with redis.lock("lock:nse_session", timeout=10):
 
 ### Future (Post-Phase III)
 
+- **Phase 10: Institutional Upgrades** (Meta-Learner, F&O Data, ATR Sizing)
 - NSE PDF corporate announcement analysis (infrastructure ready, ~4.5h effort)
 - Survivorship-bias-free LightGBM training (requires delisted stock data)
 - NSE market holiday calendar integration
 - Full signal analytics date-range selector (frontend)
+
+---
+
+## 21. Advanced Risk: Volatility-Adjusted Sizing
+
+To achieve institutional-grade risk management, the system uses **ATR-based Position Sizing**. This ensures that the monetary risk (the amount lost if the stop-loss is hit) is constant, regardless of the stock's volatility.
+
+### 21.1 The Math of Sizing
+
+1.  **Risk per Trade ($R$):** The maximum amount of capital the user is willing to lose on a single trade.
+    *   `R = Total Portfolio Value × Risk% (e.g., 1%)`
+2.  **Distance to Stop ($D$):** The difference between the entry price and the stop-loss price.
+    *   `D = Entry Price - Stop Loss Price`
+3.  **Quantity ($Q$):** The number of shares to buy.
+    *   `Q = R / D`
+
+### 21.2 Example Comparison
+
+| Scenario | Entry | Stop Loss | Distance (D) | Risk (R) | Quantity (Q) | Total Value |
+|----------|-------|-----------|--------------|----------|--------------|-------------|
+| **Stable Stock** | ₹1000 | ₹980 (2%) | ₹20 | ₹500 | **25 shares** | ₹25,000 |
+| **Volatile Stock** | ₹1000 | ₹950 (5%) | ₹50 | ₹500 | **10 shares** | ₹10,000 |
+
+*Result: In both cases, if the stop-loss is hit, the user loses exactly ₹500. This protects the portfolio from high-volatility "whipsaws".*
+
 

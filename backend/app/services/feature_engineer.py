@@ -38,6 +38,9 @@ FEATURE_NAMES: list[str] = [
     "close_vs_sma20",    # (close - SMA20) / SMA20
     "close_vs_sma50",    # (close - SMA50) / SMA50
     "sentiment_score",   # Phase 4 rolling 24-h weighted sentiment [-1, 1]
+    # Phase 10 additions — F&O features (appended; old models get neutral defaults)
+    "pcr_ratio",         # Put-Call Ratio (Total Put OI / Total Call OI); neutral = 1.0
+    "oi_momentum",       # Change in total OI as fraction; neutral = 0.0
     # Phase 3b additions — added without breaking old models (appended at end)
     "momentum_1m",       # 21-bar price return: (close[-1] / close[-22]) - 1
     "momentum_3m",       # 63-bar price return: (close[-1] / close[-64]) - 1
@@ -217,6 +220,8 @@ def build_features(
     lows:    list[float],
     volumes: list[float],
     sentiment_score: Optional[float] = None,
+    pcr_ratio: Optional[float] = None,
+    oi_momentum: Optional[float] = None,
 ) -> dict[str, float]:
     """Return a feature dict for ``symbol`` using provided OHLCV series.
 
@@ -232,6 +237,10 @@ def build_features(
     sentiment_score:
         Pre-fetched Phase 4 rolling sentiment for this symbol [-1, 1].
         ``None`` → 0.0 (neutral default).
+    pcr_ratio:
+        Put-Call Ratio from NSE option chain. Default 1.0 (neutral).
+    oi_momentum:
+        Open Interest % change. Default 0.0 (no change).
     """
     c = np.array(closes,  dtype=float)
     h = np.array(highs,   dtype=float)
@@ -249,6 +258,9 @@ def build_features(
         "close_vs_sma20": _sma_ratio(c, 20),
         "close_vs_sma50": _sma_ratio(c, 50),
         "sentiment_score": float(sentiment_score) if sentiment_score is not None else 0.0,
+        # Phase 10: F&O features — neutral defaults when no data available
+        "pcr_ratio":      float(pcr_ratio)    if pcr_ratio    is not None else 1.0,
+        "oi_momentum":    float(oi_momentum)  if oi_momentum  is not None else 0.0,
         # Phase 3b — momentum / volatility / 52-week range
         "momentum_1m":       _momentum(c, 21),
         "momentum_3m":       _momentum(c, 63),
