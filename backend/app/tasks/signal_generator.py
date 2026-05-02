@@ -1,4 +1,4 @@
-﻿"""Technical-indicator + ML signal generation task — Phase 2 / Phase 3.
+"""Technical-indicator + ML signal generation task — Phase 2 / Phase 3.
 
 Runs after EOD data ingestion (4:45 PM IST Mon–Fri).  Reads the last
 N days of daily OHLCV from ``ohlcv_daily``, computes three indicators,
@@ -259,7 +259,7 @@ def generate_signals(self):
                 # ── Fetch last _LOOKBACK days of OHLCV ────────────────────────
                 rows = session.execute(
                     text("""
-                        SELECT close, high, low, volume
+                        SELECT ts, close, high, low, volume
                         FROM   ohlcv_daily
                         WHERE  symbol = :symbol
                         ORDER  BY ts DESC
@@ -274,21 +274,38 @@ def generate_signals(self):
                 # Oldest → newest
                 rows_asc = list(reversed(rows))
 
-                # Lookahead guard: if running during IST market hours, drop
-                # the current incomplete bar so we don't score a half-candle.
+                # Lookahead guard: discard the last bar ONLY when:
+                #   (a) the task runs during IST market hours (09:15–15:30 Mon–Fri)
+                #   (b) AND the last bar's ts is actually today's date
+                # Condition (b) prevents accidentally dropping yesterday's bar when
+                # the 4:45 PM signal task fires before the EOD ingest has run
+                # or when the server clock is slightly behind.
                 import datetime as _dt
-                _now_ist = _dt.datetime.now(_IST)
+                _now_ist   = _dt.datetime.now(_IST)
+                _today_ist = _now_ist.date()
                 _market_open = (
                     _now_ist.weekday() < 5           # Mon–Fri
                     and _dt.time(9, 15) <= _now_ist.time() <= _dt.time(15, 30)
                 )
                 if _market_open and len(rows_asc) > _MIN_BARS:
-                    rows_asc = rows_asc[:-1]   # discard today's incomplete candle
+                    # rows_asc[-1] is (ts, close, high, low, volume)
+                    _last_ts = rows_asc[-1][0]
+                    _last_date = (
+                        _last_ts.date() if hasattr(_last_ts, "date")
+                        else _dt.date.fromisoformat(str(_last_ts)[:10])
+                    )
+                    if _last_date == _today_ist:
+                        rows_asc = rows_asc[:-1]   # discard today's incomplete candle
+                        logger.debug(
+                            "signal_generator.lookahead_guard_fired",
+                            symbol=sym,
+                            discarded_date=str(_last_date),
+                        )
 
-                closes  = [float(r[0]) for r in rows_asc]
-                highs   = [float(r[1]) for r in rows_asc]
-                lows    = [float(r[2]) for r in rows_asc]
-                volumes = [float(r[3]) for r in rows_asc]
+                closes  = [float(r[1]) for r in rows_asc]
+                highs   = [float(r[2]) for r in rows_asc]
+                lows    = [float(r[3]) for r in rows_asc]
+                volumes = [float(r[4]) for r in rows_asc]
 
                 # ── Technical signal (always computed) ────────────────────────
                 tech_signal = _score_symbol(closes)

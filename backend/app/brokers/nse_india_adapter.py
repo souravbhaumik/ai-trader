@@ -347,15 +347,27 @@ class NSEIndiaAdapter(BrokerAdapter):
                     missing.append(clean)
 
             # ── Step 4: individual fallback for symbols not in any bulk index ────────
-            for sym in missing:
-                item = await self._get_json(session, f"/api/quote-equity?symbol={sym}")
-                if item and "priceInfo" in item:
-                    d = item["priceInfo"]
-                    d.setdefault("lastPrice", item.get("lastPrice"))
-                    quotes.append(_make_quote(sym, d))
-                else:
+            # Use a semaphore (max 4 concurrent) instead of sequential 200ms delays.
+            # 50 missing symbols: ~3s with semaphore vs ~10s sequential.
+            _SEM = asyncio.Semaphore(4)
+
+            async def _fetch_one(sym: str) -> Optional[Quote]:
+                async with _SEM:
+                    item = await self._get_json(session, f"/api/quote-equity?symbol={sym}")
+                    if item and "priceInfo" in item:
+                        d = item["priceInfo"]
+                        d.setdefault("lastPrice", item.get("lastPrice"))
+                        return _make_quote(sym, d)
                     logger.debug("nse_symbol_not_found", symbol=sym)
-                await asyncio.sleep(0.2)  # polite spacing for individual calls
+                    return None
+
+            fallback_results = await asyncio.gather(
+                *[_fetch_one(sym) for sym in missing],
+                return_exceptions=True,
+            )
+            for res in fallback_results:
+                if isinstance(res, Quote):
+                    quotes.append(res)
 
             _record_success()
             n_bulk       = len(quotes) - len([s for s in missing if s in {q.symbol for q in quotes}])
