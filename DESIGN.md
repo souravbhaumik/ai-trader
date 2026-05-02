@@ -1185,11 +1185,48 @@ async with redis.lock("lock:nse_session", timeout=10):
 
 ### Future (Post-Phase III)
 
-- **Phase 10: Institutional Upgrades** (Meta-Learner, F&O Data, ATR Sizing)
+- **Phase 10: Institutional Upgrades** (Meta-Learner, F&O Data, ATR Sizing) ✅
+- **Phase 11: Institutional Alpha (The "Delivery" Engine)** ✅
+    - Capture NSE delivery percentage to distinguish institutional buying from retail speculation.
+    - Meta-Labeling: Use a secondary "Filter" logic to discard low-confidence BUY/SELL signals.
+    - Volatility-Adjusted Exit Strategy: Dynamic target prices based on ATR.
 - NSE PDF corporate announcement analysis (infrastructure ready, ~4.5h effort)
-- Survivorship-bias-free LightGBM training (requires delisted stock data)
-- NSE market holiday calendar integration
-- Full signal analytics date-range selector (frontend)
+
+---
+
+## 23. Phase 12: UI/UX & Admin Control
+
+### 23.1 Institutional Visualization (Dashboard)
+To provide traders with high-conviction cues, the UI now explicitly surfaces "Smart Money" metrics captured in Phase 11.
+*   **Delivery Highlight:** Signals with Delivery % > 40% are visually flagged (Green) to indicate institutional accumulation.
+*   **PCR Sentiment:** The Put-Call Ratio is displayed to show options-market bias alongside technical confidence.
+
+### 23.2 Granular Pipeline Control (Admin)
+The Admin Pipeline Panel has been expanded to an 11-step unified runbook. Administrators can now manually trigger and monitor Phase 10/11 automated tasks:
+1.  **F&O Ingest:** Manual fetch of PCR/OI data.
+2.  **Meta-Learner:** Manual trigger for 30-day historical weight optimization.
+
+### 23.3 API Layer Refactoring
+The backend `signals` and `admin/pipeline` APIs were upgraded to support these features:
+*   **Feature Extraction:** `GET /signals` now extracts and returns `delivery_pct` and `pcr_ratio` from the JSONB features column.
+*   **Trigger Endpoints:** Added `POST /admin/pipeline/fno-ingest` and `POST /admin/pipeline/meta-learner`.
+
+---
+
+## 22. Phase 11: Institutional Alpha Features
+
+### 22.1 Delivery Engine (Institutional Footprint)
+Retail day-traders close their positions before 3:30 PM. Institutions take "delivery" of the stock. By tracking the **Delivery Percentage**, we identify where the "Smart Money" is accumulating.
+
+*   **Delivery Momentum:** The 5-day slope of delivery volume. Rising delivery + rising price = Institutional Accumulation (High Accuracy).
+*   **Smart Money Score:** A binary feature where `1.0` is assigned if Delivery % > 40% and Price Change > 2%.
+
+### 22.2 Multi-Target Meta-Labeling
+Instead of a single model predicting direction, Phase 11 uses a dual-model architecture:
+1.  **Primary Model:** Predicts BUY/SELL direction.
+2.  **Meta-Model:** Predicts the *probability of success* (binary: will it hit target or SL?).
+
+Signals are only emitted if: `Primary_Direction == BUY` AND `Blended_Confidence > 0.65`.
 
 ---
 
